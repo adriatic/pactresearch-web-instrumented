@@ -68,6 +68,53 @@ function makeRequest(body: unknown) {
   });
 }
 
+// Minimal SSE stream for tests that only care about what request body was
+// sent to Anthropic, not about incremental delta timing (unlike
+// createAnthropicStreamHandler's multi-word, optionally-delayed stream).
+function buildTinySseStream(text: string): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const events = [
+    {
+      type: "message_start",
+      data: {
+        type: "message_start",
+        message: {
+          id: "msg_tiny",
+          type: "message",
+          role: "assistant",
+          model: mockAnthropicStreamedModel,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 0 },
+        },
+      },
+    },
+    {
+      type: "content_block_delta",
+      data: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text },
+      },
+    },
+    { type: "message_stop", data: { type: "message_stop" } },
+  ];
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const event of events) {
+        controller.enqueue(
+          encoder.encode(
+            `event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`,
+          ),
+        );
+      }
+      controller.close();
+    },
+  });
+}
+
 describe("POST /api/execute", () => {
   let API_URL: string;
   let ANON_KEY: string;
@@ -100,6 +147,9 @@ describe("POST /api/execute", () => {
     runLocalSql(
       "GRANT EXECUTE ON FUNCTION public.try_acquire_execution_lock" +
         "(uuid, uuid, interval) TO anon, authenticated, service_role;",
+    );
+    runLocalSql(
+      "GRANT SELECT, INSERT, UPDATE, DELETE ON public.app_settings TO anon, authenticated, service_role;",
     );
 
     const status = getLocalSupabaseStatus();
@@ -422,5 +472,69 @@ describe("POST /api/execute", () => {
       .eq("user_id", userId);
     expect(lockErrorAfter).toBeNull();
     expect(lockRowsAfter).toHaveLength(0);
+  });
+
+  test("uses the configured app_settings.max_tokens value, not a hardcoded one", async () => {
+    currentCookies = await signInAsTestUser();
+
+    const { error: settingsError } = await admin
+      .from("app_settings")
+      .update({ max_tokens: 55 })
+      .eq("id", 1);
+    expect(settingsError).toBeNull();
+
+    let capturedMaxTokens: number | undefined;
+    server.use(
+      http.post(
+        "https://api.anthropic.com/v1/messages",
+        async ({ request }) => {
+          const body = (await request.json()) as { max_tokens?: number };
+          capturedMaxTokens = body.max_tokens;
+          return new HttpResponse(buildTinySseStream("configured"), {
+            headers: { "content-type": "text/event-stream" },
+          });
+        },
+      ),
+    );
+
+    const promptText = `configured-max-tokens-${Date.now()}`;
+    const response = await POST(makeRequest({ discussionId, promptText }));
+
+    expect(response.status).toBe(200);
+    expect(capturedMaxTokens).toBe(55);
+
+    await admin.from("app_settings").update({ max_tokens: 40000 }).eq("id", 1);
+  });
+
+  test("falls back to the old hardcoded max_tokens when app_settings has no row", async () => {
+    currentCookies = await signInAsTestUser();
+
+    const { error: deleteError } = await admin
+      .from("app_settings")
+      .delete()
+      .eq("id", 1);
+    expect(deleteError).toBeNull();
+
+    let capturedMaxTokens: number | undefined;
+    server.use(
+      http.post(
+        "https://api.anthropic.com/v1/messages",
+        async ({ request }) => {
+          const body = (await request.json()) as { max_tokens?: number };
+          capturedMaxTokens = body.max_tokens;
+          return new HttpResponse(buildTinySseStream("fallback"), {
+            headers: { "content-type": "text/event-stream" },
+          });
+        },
+      ),
+    );
+
+    const promptText = `fallback-max-tokens-${Date.now()}`;
+    const response = await POST(makeRequest({ discussionId, promptText }));
+
+    expect(response.status).toBe(200);
+    expect(capturedMaxTokens).toBe(1000);
+
+    await admin.from("app_settings").insert({ id: 1, max_tokens: 40000 });
   });
 });

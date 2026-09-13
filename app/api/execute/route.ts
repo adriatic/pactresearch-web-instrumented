@@ -5,6 +5,11 @@ import { withFullTiming, type HandlerTimer } from "@/lib/timing";
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
+// Used only if app_settings can't be read for some reason (empty table,
+// query error) -- the previous hardcoded value, so a settings-table
+// outage degrades to the old behavior rather than failing every run.
+const FALLBACK_MAX_TOKENS = 1000;
+
 // Minimum time between UPDATEs to the responses row while content streams
 // in. Anthropic's content_block_delta events can arrive many times a
 // second — writing to Postgres on every single one would be wasteful and
@@ -79,6 +84,29 @@ async function handlePost(timer: HandlerTimer, request: Request) {
   }
 
   try {
+    // Global, admin-configurable cap (see app_settings / 20260913035840)
+    // -- replaces the old hardcoded max_tokens: 1000, which is exactly
+    // what caused the truncated long responses found in the earlier
+    // timing investigation. A missing/unreadable settings row falls back
+    // to that same old value rather than failing the run.
+    const settingsReadStart = performance.now();
+    let maxTokens = FALLBACK_MAX_TOKENS;
+    const { data: settings, error: settingsError } = await supabase
+      .from("app_settings")
+      .select("max_tokens")
+      .eq("id", 1)
+      .maybeSingle();
+    timer.mark("settings-read", performance.now() - settingsReadStart);
+
+    if (settingsError || !settings) {
+      console.error(
+        `[app-settings-fallback] Could not read app_settings (id=1) -- falling back to max_tokens=${FALLBACK_MAX_TOKENS}.`,
+        settingsError ?? "no row found",
+      );
+    } else {
+      maxTokens = settings.max_tokens;
+    }
+
     // Investigation-only timing (kept permanently, same call as the
     // discussion-switch instrumentation: cheap, and this is the app's
     // actual core operation). anthropicFetchStart is the reference point
@@ -96,7 +124,7 @@ async function handlePost(timer: HandlerTimer, request: Request) {
       },
       body: JSON.stringify({
         model: ANTHROPIC_MODEL,
-        max_tokens: 1000,
+        max_tokens: maxTokens,
         stream: true,
         messages: [{ role: "user", content: promptText }],
       }),
