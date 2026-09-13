@@ -537,4 +537,73 @@ describe("POST /api/execute", () => {
 
     await admin.from("app_settings").insert({ id: 1, max_tokens: 40000 });
   });
+
+  test("logs the real Anthropic error server-side but returns only a generic message to the user", async () => {
+    currentCookies = await signInAsTestUser();
+
+    server.use(
+      http.post("https://api.anthropic.com/v1/messages", () => {
+        return HttpResponse.json(
+          {
+            type: "error",
+            error: {
+              type: "authentication_error",
+              message: "invalid x-api-key",
+            },
+          },
+          { status: 401 },
+        );
+      }),
+    );
+
+    const consoleErrorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    let response: Response;
+    let body: { error: string; errorId: string };
+    let loggedCalls: unknown[][];
+    try {
+      const promptText = `anthropic-failure-${Date.now()}`;
+      response = await POST(makeRequest({ discussionId, promptText }));
+      body = await response.json();
+    } finally {
+      // Captured before restoring -- mockRestore() also clears the
+      // recorded call history (same as mockReset()), so inspecting
+      // consoleErrorSpy.mock.calls after restoring would always see zero.
+      loggedCalls = [...consoleErrorSpy.mock.calls];
+      consoleErrorSpy.mockRestore();
+    }
+
+    // User-facing: generic, no leaked detail, but a correlation id to
+    // match back to the server-side log line.
+    expect(response!.status).toBe(500);
+    expect(body!.error).toBe(
+      "Execution failed. Please try again or contact support if this persists.",
+    );
+    expect(body!.error).not.toContain("authentication_error");
+    expect(body!.error).not.toContain("invalid x-api-key");
+    expect(typeof body!.errorId).toBe("string");
+    expect(body!.errorId.length).toBeGreaterThan(0);
+
+    // Server-side: the real cause, in full, tagged with that same id.
+    expect(loggedCalls.length).toBeGreaterThan(0);
+    const loggedText = loggedCalls
+      .flat()
+      .map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg)))
+      .join("\n");
+    expect(loggedText).toContain("[execute-error]");
+    expect(loggedText).toContain(body!.errorId);
+    expect(loggedText).toContain("401");
+    expect(loggedText).toContain("authentication_error");
+    expect(loggedText).toContain("invalid x-api-key");
+
+    // The lock must still be released despite the failure.
+    const { data: lockRows, error: lockCheckError } = await admin
+      .from("execution_locks")
+      .select("*")
+      .eq("user_id", userId);
+    expect(lockCheckError).toBeNull();
+    expect(lockRows).toHaveLength(0);
+  });
 });

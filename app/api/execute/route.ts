@@ -132,8 +132,17 @@ async function handlePost(timer: HandlerTimer, request: Request) {
     timer.mark("anthropic-connect", performance.now() - anthropicFetchStart);
 
     if (!anthropicResponse.ok || !anthropicResponse.body) {
+      // Anthropic's error responses are a JSON body describing exactly what
+      // went wrong (bad/expired key, invalid_request_error for a bad
+      // param, rate limit, etc.) -- read it now, while the response is
+      // still available, so the real cause ends up in the thrown error's
+      // own message rather than just a bare status code. Whatever this
+      // throws is what the catch block below logs in full.
+      const errorBody = await anthropicResponse
+        .text()
+        .catch(() => "<failed to read response body>");
       throw new Error(
-        `Anthropic API request failed with status ${anthropicResponse.status}`,
+        `Anthropic API request failed with status ${anthropicResponse.status}: ${errorBody}`,
       );
     }
 
@@ -317,8 +326,29 @@ async function handlePost(timer: HandlerTimer, request: Request) {
       response: accumulatedText,
       resolved_model: resolvedModel,
     });
-  } catch {
-    return Response.json({ error: "Execution failed." }, { status: 500 });
+  } catch (error) {
+    // The real cause (Anthropic error body, a Supabase error object, a
+    // network failure, whatever it is) must always be logged in full here
+    // -- this is the only place it's ever seen, and the user-facing
+    // response below is deliberately generic, never the raw error. A
+    // vague "Execution failed." with nothing logged turned a one-line
+    // diagnosis into two rounds of hypothesis-testing once already; see
+    // errorId below for matching a user's report back to this line.
+    const errorId = crypto.randomUUID();
+    const errorMessage =
+      error instanceof Error ? error.message : JSON.stringify(error);
+    console.error(
+      `[execute-error] id=${errorId} discussionId=${discussionId}: ${errorMessage}`,
+      error instanceof Error ? error.stack : error,
+    );
+    return Response.json(
+      {
+        error:
+          "Execution failed. Please try again or contact support if this persists.",
+        errorId,
+      },
+      { status: 500 },
+    );
   } finally {
     const lockReleaseStart = performance.now();
     await supabase.from("execution_locks").delete().eq("user_id", user.id);
