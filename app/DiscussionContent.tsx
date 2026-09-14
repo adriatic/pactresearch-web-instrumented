@@ -1,6 +1,7 @@
 "use client";
 
 import type { PastResponse } from "./useDiscussionExecution";
+import { MarkdownResponse } from "./MarkdownResponse";
 
 // The scrolling middle region of the fixed layout: the active
 // discussion's identifier, its history, the live-streaming response, and
@@ -49,7 +50,7 @@ export function DiscussionContent({
                 <strong>Response</strong>
                 {entry.resolved_model ? ` — ${entry.resolved_model}` : ""}:
               </p>
-              <pre>{entry.response}</pre>
+              <MarkdownResponse content={entry.response ?? ""} />
             </div>
           ))}
         </div>
@@ -60,7 +61,7 @@ export function DiscussionContent({
             Live response{isStreaming ? " (streaming...)" : ""}
             {streamedModel ? ` — ${streamedModel}` : ""}
           </h2>
-          <pre>{streamedResponse}</pre>
+          <MarkdownResponse content={streamedResponse} />
         </div>
       )}
       {result && <pre>{result}</pre>}
