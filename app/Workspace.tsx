@@ -160,14 +160,22 @@ export function Workspace({
           </button>{" "}
           {/* Acts on whatever discussion is currently selected, using
               whatever text is in that discussion's composer. Disabled
-              with no discussion selected, matching how the other header
-              buttons gate on their own applicability. This is the sole
-              run trigger — see Composer.tsx for why the composer no
-              longer has one of its own. */}
+              with no discussion selected (matching how the other header
+              buttons gate on their own applicability) or with nothing
+              worth running — execution.promptText is the same live state
+              the composer's textarea is bound to, so this reacts to every
+              keystroke and to a discussion switch's restored draft with
+              no separate wiring. This is the sole run trigger — see
+              Composer.tsx for why the composer no longer has one of its
+              own. */}
           <button
             type="button"
             onClick={() => execution.run()}
-            disabled={execution.loading || !activeDiscussionId}
+            disabled={
+              execution.loading ||
+              !activeDiscussionId ||
+              execution.promptText.trim().length === 0
+            }
           >
             {execution.loading ? "Running..." : "Run"}
           </button>{" "}

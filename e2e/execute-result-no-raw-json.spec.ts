@@ -117,6 +117,18 @@ async function seedSignedInUserWithDiscussion(
   );
 
   await page.goto("/");
+
+  // Waits for the auto-selected discussion's initial load (its history +
+  // persisted draft fetch, see useDiscussionExecution's saveThenLoad) to
+  // actually finish before returning control to the test. Without this,
+  // filling the composer immediately after goto() races that fetch: if it
+  // resolves after the fill, its setPromptText(persisted draft) clobbers
+  // whatever was just typed with this fresh discussion's empty draft --
+  // a real, pre-existing race in the app's initial-load effect, not
+  // something this suite should paper over by asserting against it.
+  // "Switched in ..." is set at the very end of that same effect, so its
+  // appearance is a reliable signal the race window has closed.
+  await page.getByText(/Switched in/).waitFor({ timeout: 15_000 });
 }
 
 // Covers every field name that could leak from either a success body
