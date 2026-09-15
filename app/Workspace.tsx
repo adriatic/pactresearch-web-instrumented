@@ -17,21 +17,22 @@ function formatSwitchDuration(ms: number): string {
 // independent scroll), a fixed header toolbar, a fixed composer, and a
 // scrolling middle region for the active discussion's content. Ports
 // pact-mac's actual App.tsx shell structure (confirmed against a
-// screenshot of the real app): the composer sits fixed near the top of
-// the main panel, directly below the header, above the scrolling
-// content — not a bottom-pinned footer. Header toolbar buttons
+// screenshot of the real app): the composer sits near the top of the
+// main panel, directly below the header, above the scrolling content —
+// not a bottom-pinned footer. Header toolbar buttons
 // (New Notebook/Settings/Account/Model) exist in their real fixed
 // position but stay disabled/unwired -- their dialogs/behavior are
-// separate, not-yet-built work. Import is wired (.pact import, see
-// handleImportFileSelected); Export lives on each notebook row in
-// Explorer.tsx, not in this header.
+// separate, not-yet-built work. Run and Import are wired (Run acts on
+// the selected discussion, see execution.run(); Import handles .pact
+// files, see handleImportFileSelected); Export lives on each notebook
+// row in Explorer.tsx, not in this header.
 //
-// The sidebar/main-panel split and its drag handle use
-// react-resizable-panels (Group/Panel/Separator — this app's installed
-// version, v4, renamed from the older PanelGroup/PanelResizeHandle names
-// still shown in a lot of older docs/tutorials) rather than hand-rolled
-// drag math: zero dependencies, 22M+ weekly downloads, published days
-// before this was written. minSize/maxSize on the sidebar Panel are
+// Both splits — sidebar/main-panel, and composer/discussion-content —
+// use react-resizable-panels (Group/Panel/Separator — this app's
+// installed version, v4, renamed from the older PanelGroup/
+// PanelResizeHandle names still shown in a lot of older docs/tutorials)
+// rather than hand-rolled drag math: zero dependencies, 22M+ weekly
+// downloads, published days before this was written. minSize/maxSize are
 // plain pixel values — session-only, matching 3.13 decision 4's
 // still-deferred persisted-UI-preference boundary (no localStorage/
 // defaultLayout wiring here).
@@ -117,6 +118,13 @@ export function Workspace({
     setLastDeletedNotebookId(notebookId);
   }
 
+  function handleDiscussionDeleted(discussionId: string) {
+    if (activeDiscussionId === discussionId) {
+      setActiveDiscussionId(null);
+    }
+    setDiscussionListRefetchToken((t) => t + 1);
+  }
+
   return (
     <Group orientation="horizontal" style={{ height: "100vh" }}>
       <Panel
@@ -129,10 +137,12 @@ export function Workspace({
           activeDiscussionId={activeDiscussionId}
           onSelect={setActiveDiscussionId}
           onNotebookDeleted={handleNotebookDeleted}
+          onDiscussionDeleted={handleDiscussionDeleted}
           refetchToken={discussionListRefetchToken}
         />
         <hr />
         <NotebookCreator
+          onNotebookCreated={() => setDiscussionListRefetchToken((t) => t + 1)}
           onDiscussionCreated={handleDiscussionCreated}
           lastDeletedNotebookId={lastDeletedNotebookId}
         />
@@ -147,6 +157,19 @@ export function Workspace({
           <strong>PACT</strong>{" "}
           <button type="button" disabled>
             New Notebook
+          </button>{" "}
+          {/* Acts on whatever discussion is currently selected, using
+              whatever text is in that discussion's composer. Disabled
+              with no discussion selected, matching how the other header
+              buttons gate on their own applicability. This is the sole
+              run trigger — see Composer.tsx for why the composer no
+              longer has one of its own. */}
+          <button
+            type="button"
+            onClick={() => execution.run()}
+            disabled={execution.loading || !activeDiscussionId}
+          >
+            {execution.loading ? "Running..." : "Run"}
           </button>{" "}
           <button
             type="button"
@@ -182,26 +205,36 @@ export function Workspace({
             </span>
           )}
         </header>
-        <div style={{ flexShrink: 0 }}>
-          <Composer
-            discussionId={activeDiscussionId}
-            promptText={execution.promptText}
-            setPromptText={execution.setPromptText}
-            loading={execution.loading}
-            onSubmit={execution.handleSubmit}
+        {/* The composer and the discussion content are their own vertical
+            Group so the boundary between them is a real draggable
+            divider, replacing the textarea's native corner resize grip
+            (see Composer.tsx). Same library and same session-only,
+            pixel-valued sizing as the sidebar split above — persisting
+            this layout stays behind 3.13 decision 4. minHeight: 0 is
+            what lets this Group actually shrink inside the surrounding
+            flex column rather than being floored at its content height. */}
+        <Group orientation="vertical" style={{ flex: 1, minHeight: 0 }}>
+          <Panel defaultSize={140} minSize={64} maxSize={480}>
+            <Composer
+              promptText={execution.promptText}
+              setPromptText={execution.setPromptText}
+            />
+          </Panel>
+          <Separator
+            style={{ height: 4, cursor: "row-resize", background: "#ccc" }}
           />
-        </div>
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          <DiscussionContent
-            discussionId={activeDiscussionId}
-            discussionName={execution.discussionName}
-            history={execution.history}
-            streamedResponse={execution.streamedResponse}
-            streamedModel={execution.streamedModel}
-            isStreaming={execution.isStreaming}
-            executionError={execution.executionError}
-          />
-        </div>
+          <Panel style={{ overflowY: "auto" }}>
+            <DiscussionContent
+              discussionId={activeDiscussionId}
+              discussionName={execution.discussionName}
+              history={execution.history}
+              streamedResponse={execution.streamedResponse}
+              streamedModel={execution.streamedModel}
+              isStreaming={execution.isStreaming}
+              executionError={execution.executionError}
+            />
+          </Panel>
+        </Group>
       </Panel>
     </Group>
   );

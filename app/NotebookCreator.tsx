@@ -4,10 +4,17 @@ import { useRef, useState } from "react";
 
 const CATEGORIES = ["Personal Research", "Dev Test"] as const;
 
+interface ExistingDiscussion {
+  notebook_id: string;
+  name: string | null;
+}
+
 export function NotebookCreator({
+  onNotebookCreated,
   onDiscussionCreated,
   lastDeletedNotebookId,
 }: {
+  onNotebookCreated: () => void;
   onDiscussionCreated: (discussionId: string) => void;
   lastDeletedNotebookId: string | null;
 }) {
@@ -15,18 +22,16 @@ export function NotebookCreator({
   const [category, setCategory] = useState<(typeof CATEGORIES)[number]>(
     CATEGORIES[0],
   );
-  // Human-readable confirmation/error text — never the raw API response.
-  // The full response is still visible in the browser's own network tab
-  // for anyone who genuinely needs it; it doesn't need a second home in
-  // this UI.
-  const [notebookMessage, setNotebookMessage] = useState<string | null>(null);
+  // Errors only. Success confirmations used to live here too ("Notebook
+  // \"X\" created."), but the notebook/discussion appearing in the
+  // Explorer tree is already the confirmation — a second textual one said
+  // nothing the tree didn't.
+  const [notebookError, setNotebookError] = useState<string | null>(null);
   const [notebookLoading, setNotebookLoading] = useState(false);
   const [notebookId, setNotebookId] = useState<string | null>(null);
 
   const [discussionName, setDiscussionName] = useState("");
-  const [discussionMessage, setDiscussionMessage] = useState<string | null>(
-    null,
-  );
+  const [discussionError, setDiscussionError] = useState<string | null>(null);
   const [discussionLoading, setDiscussionLoading] = useState(false);
 
   // Refs, not state, so the guard is checked synchronously at the top of
@@ -49,9 +54,9 @@ export function NotebookCreator({
   if (lastDeletedNotebookId !== handledDeletedNotebookId) {
     setHandledDeletedNotebookId(lastDeletedNotebookId);
     if (lastDeletedNotebookId && lastDeletedNotebookId === notebookId) {
-      setNotebookMessage(null);
+      setNotebookError(null);
       setNotebookId(null);
-      setDiscussionMessage(null);
+      setDiscussionError(null);
       setDiscussionName("");
     }
   }
@@ -61,7 +66,7 @@ export function NotebookCreator({
     if (notebookInFlight.current) return;
     notebookInFlight.current = true;
     setNotebookLoading(true);
-    setNotebookMessage(null);
+    setNotebookError(null);
     setNotebookId(null);
 
     try {
@@ -72,13 +77,19 @@ export function NotebookCreator({
       });
       const body = await response.json();
       if (response.ok) {
-        setNotebookMessage(`Notebook "${body.name}" created.`);
         setNotebookId(body.id);
+        // The Explorer tree is now the *only* confirmation a notebook was
+        // created (the "Notebook \"X\" created." message is gone), so it
+        // has to actually refresh — it previously only refetched when a
+        // discussion was created or a notebook deleted, leaving a newly
+        // created notebook invisible until something else happened to
+        // trigger a refetch.
+        onNotebookCreated();
       } else {
-        setNotebookMessage(body.error || "Failed to create notebook.");
+        setNotebookError(body.error || "Failed to create notebook.");
       }
     } catch {
-      setNotebookMessage("Failed to create notebook — please try again.");
+      setNotebookError("Failed to create notebook — please try again.");
     } finally {
       setNotebookLoading(false);
       notebookInFlight.current = false;
@@ -90,9 +101,35 @@ export function NotebookCreator({
     if (!notebookId || discussionInFlight.current) return;
     discussionInFlight.current = true;
     setDiscussionLoading(true);
-    setDiscussionMessage(null);
+    setDiscussionError(null);
 
     try {
+      // UI-level uniqueness check only — there is deliberately no schema
+      // constraint behind this, and it is scoped to this one notebook:
+      // the same discussion name in a *different* notebook is fine. Read
+      // fresh from the server rather than trusting anything cached here,
+      // so a discussion added since this panel opened still counts.
+      // Compared trimmed and case-insensitively: "Baseline" vs
+      // "baseline " is the duplicate a user actually means to be warned
+      // about, not a distinct name.
+      const existingResponse = await fetch("/api/discussions");
+      if (existingResponse.ok) {
+        const existing = (await existingResponse.json()) as
+          ExistingDiscussion[] | null;
+        const normalized = discussionName.trim().toLowerCase();
+        const isDuplicate = (existing ?? []).some(
+          (discussion) =>
+            discussion.notebook_id === notebookId &&
+            (discussion.name ?? "").trim().toLowerCase() === normalized,
+        );
+        if (isDuplicate) {
+          setDiscussionError(
+            `This notebook already has a discussion named "${discussionName.trim()}". Pick a different name.`,
+          );
+          return;
+        }
+      }
+
       const response = await fetch("/api/discussions", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -100,13 +137,12 @@ export function NotebookCreator({
       });
       const body = await response.json();
       if (response.ok) {
-        setDiscussionMessage(`Discussion "${body.name}" created.`);
         onDiscussionCreated(body.id);
       } else {
-        setDiscussionMessage(body.error || "Failed to create discussion.");
+        setDiscussionError(body.error || "Failed to create discussion.");
       }
     } catch {
-      setDiscussionMessage("Failed to create discussion — please try again.");
+      setDiscussionError("Failed to create discussion — please try again.");
     } finally {
       setDiscussionLoading(false);
       discussionInFlight.current = false;
@@ -147,7 +183,7 @@ export function NotebookCreator({
           {notebookLoading ? "Creating..." : "Create notebook"}
         </button>
       </form>
-      {notebookMessage && <p>{notebookMessage}</p>}
+      {notebookError && <p>{notebookError}</p>}
 
       {notebookId && (
         <>
@@ -167,7 +203,7 @@ export function NotebookCreator({
               {discussionLoading ? "Creating..." : "Create discussion"}
             </button>
           </form>
-          {discussionMessage && <p>{discussionMessage}</p>}
+          {discussionError && <p>{discussionError}</p>}
         </>
       )}
     </section>

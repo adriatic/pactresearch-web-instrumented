@@ -7,7 +7,7 @@ import { createServerClient } from "@supabase/ssr";
 // the page must show the properly rendered markdown response (and
 // nothing else) -- never the raw { "response": ..., "resolved_model":
 // ... } wrapper. This display is sourced directly from /api/execute's
-// own resolved body (handleSubmit's success branch), not from the
+// own resolved body (run()'s success branch), not from the
 // Realtime "live preview" channel -- Realtime delivery is best-effort and
 // this display must be correct even when no Realtime event ever arrives,
 // which local testing has confirmed is a real, reproducible failure mode
@@ -22,7 +22,7 @@ import { createServerClient } from "@supabase/ssr";
 // path would make the test's premise silently depend on incidental local
 // env state. Mocking both a success and a failure response directly is
 // deterministic and exercises the exact same client code path either way
-// (POST /api/execute -> success/failure branch in handleSubmit) --
+// (POST /api/execute -> success/failure branch in run()) --
 // nothing about how the client processes the response differs from a
 // real call. Deliberately not mocking the Realtime channel at all -- the
 // success test must pass whether or not a postgres_changes event ever

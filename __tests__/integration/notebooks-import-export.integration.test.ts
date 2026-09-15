@@ -248,7 +248,11 @@ describe("GET /api/notebooks/export + POST /api/notebooks/import", () => {
     expect(importResponse.status).toBe(201);
     const importedNotebook = await importResponse.json();
     expect(importedNotebook.id).not.toBe(sourceNotebookId);
-    expect(importedNotebook.name).toBe("Export source notebook");
+    // Auto-renamed: importing back into the account it was exported from
+    // collides with the source notebook's own name, so it takes the first
+    // free number. Name handling has its own dedicated test below; what
+    // matters here is the id/reference remapping.
+    expect(importedNotebook.name).toBe("Export source notebook 1");
 
     const { data: importedDiscussions, error: discussionsError } = await admin
       .from("discussions")
@@ -342,14 +346,56 @@ describe("GET /api/notebooks/export + POST /api/notebooks/import", () => {
 
     // Three fully independent notebooks now exist for this user with the
     // same content -- exactly the repeatability property this feature
-    // exists for.
+    // exists for. Their *names* are distinct: each import collided with
+    // what was already there and was auto-renamed with the next free
+    // number (placeholder behavior, see the import route's comment).
     const { data: allNotebooks, error: allError } = await admin
       .from("notebooks")
-      .select("id")
+      .select("id, name")
       .eq("user_id", userId)
-      .eq("name", "Export source notebook");
+      .like("name", "Export source notebook%");
     expect(allError).toBeNull();
     expect(allNotebooks).toHaveLength(3);
+    expect(allNotebooks!.map((n) => n.name).sort()).toEqual([
+      "Export source notebook",
+      "Export source notebook 1",
+      "Export source notebook 2",
+    ]);
+  });
+
+  test("an imported notebook keeps its own name when nothing collides, and fills the first free number when something does", async () => {
+    const { userId, cookies } = await createSignedInUser();
+    currentCookies = cookies;
+    const { notebookId: sourceNotebookId } = await seedSourceNotebook(userId);
+    const exportResponse = await exportGet(makeExportRequest(sourceNotebookId));
+    const pactExport = await exportResponse.json();
+
+    // A collision-free import under a fresh account keeps the original
+    // name untouched -- auto-renaming only ever kicks in on a real clash.
+    const otherAccount = await createSignedInUser();
+    currentCookies = otherAccount.cookies;
+    const cleanImport = await importPost(makeImportRequest(pactExport));
+    expect(cleanImport.status).toBe(201);
+    expect((await cleanImport.json()).name).toBe("Export source notebook");
+
+    // Back in the original account, "Export source notebook" is taken, so
+    // the first import lands on " 1".
+    currentCookies = cookies;
+    const firstCollision = await importPost(makeImportRequest(pactExport));
+    expect((await firstCollision.json()).name).toBe("Export source notebook 1");
+
+    // Deleting the original frees the bare name again, and the numbering
+    // restarts from the first genuinely free slot rather than
+    // monotonically climbing -- this is a "first free name" search, not a
+    // counter.
+    const { error: deleteError } = await admin
+      .from("notebooks")
+      .delete()
+      .eq("id", sourceNotebookId);
+    expect(deleteError).toBeNull();
+
+    const afterFreeing = await importPost(makeImportRequest(pactExport));
+    expect((await afterFreeing.json()).name).toBe("Export source notebook");
   });
 
   test("importing under a different account assigns the new notebook to that account, not the original owner", async () => {

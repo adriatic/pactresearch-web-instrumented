@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createClient } from "@/utils/supabase/client";
 
-// All of ExecuteTester's state/effects/handleSubmit, unchanged, extracted
+// All of ExecuteTester's state/effects/run(), unchanged, extracted
 // into a hook so the fixed-layout shell (Workspace.tsx) can render the
 // discussion content and the composer as two separately-positioned
 // components — a scrolling middle region and a pinned footer — while both
@@ -156,8 +156,10 @@ export function useDiscussionExecution(discussionId: string | null) {
     };
   }, [discussionId]);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  // Takes no event: the Run control lives in the global header
+  // (Workspace.tsx), not inside the composer's form, so there is no
+  // submit event to preventDefault here.
+  async function run() {
     if (!discussionId) return;
     setLoading(true);
     setExecutionError(null);
@@ -277,7 +279,7 @@ export function useDiscussionExecution(discussionId: string | null) {
     streamedModel,
     isStreaming,
     history,
-    handleSubmit,
+    run,
     lastSwitchDurationMs,
     discussionName,
   };

@@ -106,6 +106,7 @@ export function Explorer({
   activeDiscussionId,
   onSelect,
   onNotebookDeleted,
+  onDiscussionDeleted,
   refetchToken,
 }: {
   activeDiscussionId: string | null;
@@ -114,6 +115,7 @@ export function Explorer({
     notebookId: string,
     deletedDiscussionIds: string[],
   ) => void;
+  onDiscussionDeleted: (discussionId: string) => void;
   refetchToken: number;
 }) {
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
@@ -158,6 +160,33 @@ export function Explorer({
     } else if (response.status === 409) {
       setDeleteError(
         `"${name}" can't be deleted right now — a discussion in it is actively executing. Try again once that finishes.`,
+      );
+    } else {
+      setDeleteError(`Failed to delete "${name}".`);
+    }
+  }
+
+  // Per-discussion counterpart to handleDeleteNotebook above. The 409 it
+  // can get back is about *this* discussion's own active execution lock
+  // (DELETE /api/discussions), not the notebook-level "some discussion in
+  // here is executing" check — deleting one discussion is never blocked
+  // by a sibling's run.
+  async function handleDeleteDiscussion(discussionId: string, name: string) {
+    const confirmed = window.confirm(
+      `Delete discussion "${name}" and all its responses? This cannot be undone.`,
+    );
+    if (!confirmed) return;
+
+    setDeleteError(null);
+    const response = await fetch(`/api/discussions?id=${discussionId}`, {
+      method: "DELETE",
+    });
+
+    if (response.ok) {
+      onDiscussionDeleted(discussionId);
+    } else if (response.status === 409) {
+      setDeleteError(
+        `"${name}" can't be deleted right now — it's actively executing. Try again once that finishes.`,
       );
     } else {
       setDeleteError(`Failed to delete "${name}".`);
@@ -423,7 +452,16 @@ export function Explorer({
               }}
             >
               <span aria-hidden="true">💬</span>
-              <span>{data.name}</span>
+              <span style={{ flex: 1 }}>{data.name}</span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDeleteDiscussion(data.discussionId, data.name);
+                }}
+              >
+                Delete discussion
+              </button>
             </div>
           );
         })}

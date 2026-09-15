@@ -46,6 +46,31 @@ async function handlePost(request: Request) {
     cellIdMap.set(cell.id, crypto.randomUUID());
   }
 
+  // PLACEHOLDER BEHAVIOR, not the final intended UX: on a name collision
+  // this silently appends the first free number ("My Notebook" -> "My
+  // Notebook 1" -> "My Notebook 2"). A future task replaces this with a
+  // popup letting the user choose/verify the name interactively before
+  // the import completes; this exists so repeated imports of the same
+  // file produce distinguishable notebooks instead of a pile of
+  // identically-named ones. Collision is checked against the caller's own
+  // notebooks only (RLS scopes the select), since names are not globally
+  // unique and there is no schema-level constraint behind this.
+  const { data: existingNotebooks, error: existingNotebooksError } =
+    await supabase.from("notebooks").select("name");
+  if (existingNotebooksError) {
+    throw existingNotebooksError;
+  }
+
+  const takenNames = new Set(
+    (existingNotebooks ?? [])
+      .map((notebook) => notebook.name)
+      .filter((name): name is string => typeof name === "string"),
+  );
+  let importedNotebookName = pactExport.notebook.name;
+  for (let suffix = 1; takenNames.has(importedNotebookName); suffix += 1) {
+    importedNotebookName = `${pactExport.notebook.name} ${suffix}`;
+  }
+
   // Imported notebooks are never system notebooks, and never carry the
   // original's timestamps -- this is a fresh instance, not a restore.
   const { data: insertedNotebook, error: notebookError } = await supabase
@@ -53,7 +78,7 @@ async function handlePost(request: Request) {
     .insert({
       id: newNotebookId,
       user_id: user.id,
-      name: pactExport.notebook.name,
+      name: importedNotebookName,
       system_prompt: pactExport.notebook.systemPrompt,
       category: pactExport.notebook.category,
       is_system: false,

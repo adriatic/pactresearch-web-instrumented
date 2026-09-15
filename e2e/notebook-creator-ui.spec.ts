@@ -84,7 +84,7 @@ async function signInFreshUser(
 
 test.setTimeout(60_000);
 
-test("creating a notebook and a discussion shows a human-readable confirmation, never the raw API response", async ({
+test("creating a notebook and a discussion confirms via the Explorer tree alone, with no raw API response, uuid, or success message", async ({
   page,
   context,
 }) => {
@@ -97,45 +97,102 @@ test("creating a notebook and a discussion shows a human-readable confirmation, 
   // followed by a colon) must never appear anywhere on the page.
   const jsonShapedText = page.getByText(/"(id|created_at|user_id)"\s*:/);
   // Nor a raw uuid -- "Add a discussion to this notebook" used to
-  // identify the notebook by its id ("Notebook: 7df169f1-..."); the
-  // notebookMessage confirmation right above it already names it.
+  // identify the notebook by its id ("Notebook: 7df169f1-...").
   const uuidShapedText = page.getByText(
     /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
   );
+  // The "... created." confirmations are gone entirely: the row
+  // appearing in the Explorer tree is the confirmation.
+  const successConfirmation = page.getByText(/\bcreated\./);
 
   await page.getByLabel("Name:").first().fill(notebookName);
   await page.getByRole("button", { name: "Create notebook" }).click();
 
-  const notebookConfirmation = page.getByText(
-    `Notebook "${notebookName}" created.`,
-  );
-  await expect(notebookConfirmation).toBeVisible();
+  // The notebook showing up in the Explorer is now the only confirmation.
+  await expect(
+    page.getByRole("treeitem", { name: notebookName }),
+  ).toBeVisible();
   await expect(jsonShapedText).toHaveCount(0);
   // "Add a discussion to this notebook" is now showing -- this is
-  // exactly where the raw uuid used to appear.
+  // exactly where the raw uuid used to appear, and it must now carry no
+  // notebook-identifying text at all (neither id nor name).
   await expect(
     page.getByText("Add a discussion to this notebook"),
   ).toBeVisible();
   await expect(uuidShapedText).toHaveCount(0);
-
-  // The new notebook still shows up in the Explorer, same as before this
-  // fix — only the raw-JSON confirmation display is what changed.
-  await expect(
-    page.getByRole("treeitem", { name: notebookName }),
-  ).toBeVisible();
+  await expect(successConfirmation).toHaveCount(0);
 
   await page.getByLabel("Name:").last().fill(discussionName);
   await page.getByRole("button", { name: "Create discussion" }).click();
 
-  const discussionConfirmation = page.getByText(
-    `Discussion "${discussionName}" created.`,
-  );
-  await expect(discussionConfirmation).toBeVisible();
-  await expect(jsonShapedText).toHaveCount(0);
-
   await expect(
     page.getByRole("treeitem", { name: discussionName }),
   ).toBeVisible();
+  await expect(jsonShapedText).toHaveCount(0);
+  await expect(successConfirmation).toHaveCount(0);
+});
+
+test("a duplicate discussion name in the same notebook is rejected with a visible error, but the same name in a different notebook is allowed", async ({
+  page,
+  context,
+}) => {
+  const { suffix } = await signInFreshUser(page, context, "e2e-dup-discussion");
+
+  const firstNotebookName = `E2E dup notebook A ${suffix}`;
+  const secondNotebookName = `E2E dup notebook B ${suffix}`;
+  const discussionName = `E2E dup discussion ${suffix}`;
+
+  await page.getByLabel("Name:").first().fill(firstNotebookName);
+  await page.getByRole("button", { name: "Create notebook" }).click();
+  await expect(
+    page.getByText("Add a discussion to this notebook"),
+  ).toBeVisible();
+
+  await page.getByLabel("Name:").last().fill(discussionName);
+  await page.getByRole("button", { name: "Create discussion" }).click();
+  await expect(
+    page.getByRole("treeitem", { name: discussionName }),
+  ).toHaveCount(1);
+
+  // Same name, same notebook -- rejected, with a visible error, and no
+  // second row created.
+  await page.getByLabel("Name:").last().fill(discussionName);
+  await page.getByRole("button", { name: "Create discussion" }).click();
+  await expect(
+    page.getByText(
+      `This notebook already has a discussion named "${discussionName}". Pick a different name.`,
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("treeitem", { name: discussionName }),
+  ).toHaveCount(1);
+
+  // Case and surrounding whitespace don't get a user around it either --
+  // the check is trimmed and case-insensitive on purpose.
+  await page
+    .getByLabel("Name:")
+    .last()
+    .fill(`  ${discussionName.toUpperCase()} `);
+  await page.getByRole("button", { name: "Create discussion" }).click();
+  await expect(page.getByText(/already has a discussion named/)).toBeVisible();
+  await expect(
+    page.getByRole("treeitem", { name: discussionName }),
+  ).toHaveCount(1);
+
+  // A *different* notebook may reuse the name freely -- this validation
+  // is deliberately scoped per-notebook, not global.
+  await page.getByLabel("Name:").first().fill(secondNotebookName);
+  await page.getByRole("button", { name: "Create notebook" }).click();
+  await expect(
+    page.getByRole("treeitem", { name: secondNotebookName }),
+  ).toBeVisible();
+
+  await page.getByLabel("Name:").last().fill(discussionName);
+  await page.getByRole("button", { name: "Create discussion" }).click();
+  await expect(
+    page.getByRole("treeitem", { name: discussionName }),
+  ).toHaveCount(2);
+  await expect(page.getByText(/already has a discussion named/)).toHaveCount(0);
 });
 
 test("buttons render with real visual treatment, distinct from static text and from a disabled state", async ({

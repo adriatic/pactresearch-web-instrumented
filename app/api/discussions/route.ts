@@ -181,7 +181,72 @@ async function handlePatch(timer: HandlerTimer, request: Request) {
   return Response.json(updated[0]);
 }
 
+async function handleDelete(request: Request) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get("id");
+
+  if (!id) {
+    return Response.json({ error: "id is required." }, { status: 400 });
+  }
+
+  // Same protection DELETE /api/notebooks already applies, scoped to this
+  // one discussion: refuse while its own execution lock is genuinely
+  // active (non-stale), so an in-flight Anthropic call can't keep writing
+  // responses rows against a discussion that no longer exists. Note this
+  // is unrelated to the notebook-level check — that one blocks deleting a
+  // *notebook* because some discussion inside it is executing; deleting a
+  // discussion is never blocked by a sibling discussion's lock.
+  const { data: hasActiveLock, error: lockCheckError } = await supabase.rpc(
+    "discussion_has_active_execution_lock",
+    { p_discussion_id: id },
+  );
+
+  if (lockCheckError) {
+    throw lockCheckError;
+  }
+
+  if (hasActiveLock) {
+    return Response.json(
+      {
+        error: "Cannot delete this discussion while it is actively executing.",
+      },
+      { status: 409 },
+    );
+  }
+
+  // Session-scoped client + RLS: this can only ever delete a discussion
+  // the caller owns. An empty result covers both "doesn't exist" and
+  // "isn't yours" — same non-distinguishing 404 pattern as DELETE
+  // /api/notebooks. Child rows (responses, execution_locks) cascade via
+  // their own ON DELETE CASCADE.
+  const { data: deleted, error } = await supabase
+    .from("discussions")
+    .delete()
+    .eq("id", id)
+    .select();
+
+  if (error) {
+    throw error;
+  }
+
+  if (deleted.length === 0) {
+    return Response.json({ error: "Discussion not found." }, { status: 404 });
+  }
+
+  return Response.json(deleted[0]);
+}
+
 export const POST = withRouteErrorHandling(handlePost);
+export const DELETE = withRouteErrorHandling(handleDelete);
 export const GET = withRouteErrorHandling(
   withFullTiming("GET /api/discussions", handleGet),
 );

@@ -85,7 +85,16 @@ test("dragging the sidebar's resize handle changes its width within the configur
   // a plain role query — the sidebar also has a genuine <hr> (between
   // Explorer and NotebookCreator), which carries an implicit
   // role="separator" too and would otherwise collide.
-  const separator = page.locator("[data-separator]");
+  //
+  // Narrowed further to a *direct child* of the outermost group: there is
+  // now a second, nested vertical Group (composer over discussion
+  // content) with its own separator, and a bare [data-separator] query
+  // matches both. The library emits no orientation attribute to
+  // discriminate on, so structure is what's left.
+  const separator = page
+    .locator("[data-group]")
+    .first()
+    .locator("> [data-separator]");
   const sidebarPanel = page.locator("[data-panel]").first();
 
   await expect(separator).toBeVisible();
