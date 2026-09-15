@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { NotebookCreator } from "./NotebookCreator";
 import { Explorer } from "./Explorer";
@@ -20,9 +20,11 @@ function formatSwitchDuration(ms: number): string {
 // screenshot of the real app): the composer sits fixed near the top of
 // the main panel, directly below the header, above the scrolling
 // content — not a bottom-pinned footer. Header toolbar buttons
-// (New Notebook/Import/Settings/Account/Model) exist in their real fixed
-// position but stay disabled/unwired, per this task's explicit scope —
-// their dialogs/behavior are separate, not-yet-built work.
+// (New Notebook/Settings/Account/Model) exist in their real fixed
+// position but stay disabled/unwired -- their dialogs/behavior are
+// separate, not-yet-built work. Import is wired (.pact import, see
+// handleImportFileSelected); Export lives on each notebook row in
+// Explorer.tsx, not in this header.
 //
 // The sidebar/main-panel split and its drag handle use
 // react-resizable-panels (Group/Panel/Separator — this app's installed
@@ -52,12 +54,53 @@ export function Workspace({
   const [lastDeletedNotebookId, setLastDeletedNotebookId] = useState<
     string | null
   >(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
 
   const execution = useDiscussionExecution(activeDiscussionId);
 
   function handleDiscussionCreated(discussionId: string) {
     setActiveDiscussionId(discussionId);
     setDiscussionListRefetchToken((t) => t + 1);
+  }
+
+  // Reads the selected .pact file, POSTs it to /api/notebooks/import (the
+  // server does the real validation regardless of what's parsed here --
+  // this is just an early, friendly error for "not even valid JSON"),
+  // and refetches the tree so the new notebook appears. Resets the input
+  // itself so selecting the exact same file again still fires onChange.
+  async function handleImportFileSelected(
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    setImportError(null);
+    try {
+      const text = await file.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        setImportError("That file isn't valid JSON -- not a .pact file.");
+        return;
+      }
+
+      const response = await fetch("/api/notebooks/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      const body = await response.json();
+      if (response.ok) {
+        setDiscussionListRefetchToken((t) => t + 1);
+      } else {
+        setImportError(body.error || "Failed to import .pact file.");
+      }
+    } catch {
+      setImportError("Failed to read the selected file.");
+    }
   }
 
   function handleNotebookDeleted(
@@ -105,9 +148,19 @@ export function Workspace({
           <button type="button" disabled>
             New Notebook
           </button>{" "}
-          <button type="button" disabled>
+          <button
+            type="button"
+            onClick={() => importFileInputRef.current?.click()}
+          >
             Import
           </button>{" "}
+          <input
+            ref={importFileInputRef}
+            type="file"
+            accept=".pact"
+            style={{ display: "none" }}
+            onChange={handleImportFileSelected}
+          />{" "}
           <button type="button" disabled>
             Settings
           </button>{" "}
@@ -120,6 +173,12 @@ export function Workspace({
           {execution.lastSwitchDurationMs !== null && (
             <span style={{ color: "#666", fontSize: "0.85em" }}>
               Switched in {formatSwitchDuration(execution.lastSwitchDurationMs)}
+            </span>
+          )}
+          {importError && (
+            <span style={{ color: "#a00", fontSize: "0.85em" }}>
+              {" "}
+              {importError}
             </span>
           )}
         </header>

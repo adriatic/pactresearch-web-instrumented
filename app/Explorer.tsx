@@ -119,6 +119,7 @@ export function Explorer({
   const [notebooks, setNotebooks] = useState<Notebook[]>([]);
   const [discussions, setDiscussions] = useState<Discussion[]>([]);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -161,6 +162,39 @@ export function Explorer({
     } else {
       setDeleteError(`Failed to delete "${name}".`);
     }
+  }
+
+  // Downloads the notebook as a .pact file -- a plain JSON file (ported
+  // from pact-mac's export format, unsigned, minus desktop-only xmState)
+  // that importNotebook() can turn back into a fully independent notebook
+  // instance. The file itself is fetched and blobbed client-side rather
+  // than navigated to directly, matching every other action in this
+  // component being a fetch() call.
+  async function handleExportNotebook(notebookId: string, name: string) {
+    setExportError(null);
+    const response = await fetch(`/api/notebooks/export?id=${notebookId}`);
+    if (!response.ok) {
+      setExportError(`Failed to export "${name}".`);
+      return;
+    }
+    const pactExport = await response.json();
+    const blob = new Blob([JSON.stringify(pactExport, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    // Same sanitization concern as any user-provided string ending up in
+    // a filename -- strip anything that isn't safe across filesystems,
+    // collapse the rest to single hyphens.
+    const safeName = name
+      .replace(/[^a-zA-Z0-9-_]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    link.download = `${safeName || "notebook"}.pact`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   // Tracks the tree's own last-seen state so setState below can resolve
@@ -304,6 +338,7 @@ export function Explorer({
     <section>
       <h2>Explorer</h2>
       {deleteError && <p>{deleteError}</p>}
+      {exportError && <p>{exportError}</p>}
       <div {...tree.getContainerProps("Explorer")}>
         {tree.getItems().map((item) => {
           const data = item.getItemData();
@@ -350,6 +385,15 @@ export function Explorer({
                 <h3 style={{ margin: 0, fontSize: "1em", flex: 1 }}>
                   {data.name}
                 </h3>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleExportNotebook(data.notebookId, data.name);
+                  }}
+                >
+                  Export
+                </button>
                 <button
                   type="button"
                   onClick={(e) => {
