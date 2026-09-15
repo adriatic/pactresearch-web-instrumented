@@ -96,6 +96,12 @@ test("creating a notebook and a discussion shows a human-readable confirmation, 
   // Anything shaped like the raw JSON response (a quoted field name
   // followed by a colon) must never appear anywhere on the page.
   const jsonShapedText = page.getByText(/"(id|created_at|user_id)"\s*:/);
+  // Nor a raw uuid -- "Add a discussion to this notebook" used to
+  // identify the notebook by its id ("Notebook: 7df169f1-..."); the
+  // notebookMessage confirmation right above it already names it.
+  const uuidShapedText = page.getByText(
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+  );
 
   await page.getByLabel("Name:").first().fill(notebookName);
   await page.getByRole("button", { name: "Create notebook" }).click();
@@ -105,6 +111,12 @@ test("creating a notebook and a discussion shows a human-readable confirmation, 
   );
   await expect(notebookConfirmation).toBeVisible();
   await expect(jsonShapedText).toHaveCount(0);
+  // "Add a discussion to this notebook" is now showing -- this is
+  // exactly where the raw uuid used to appear.
+  await expect(
+    page.getByText("Add a discussion to this notebook"),
+  ).toBeVisible();
+  await expect(uuidShapedText).toHaveCount(0);
 
   // The new notebook still shows up in the Explorer, same as before this
   // fix — only the raw-JSON confirmation display is what changed.

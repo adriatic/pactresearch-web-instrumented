@@ -199,7 +199,7 @@ export function Workspace({
             streamedResponse={execution.streamedResponse}
             streamedModel={execution.streamedModel}
             isStreaming={execution.isStreaming}
-            result={execution.result}
+            executionError={execution.executionError}
           />
         </div>
       </Panel>

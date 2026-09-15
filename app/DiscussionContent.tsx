@@ -17,7 +17,7 @@ export function DiscussionContent({
   streamedResponse,
   streamedModel,
   isStreaming,
-  result,
+  executionError,
 }: {
   discussionId: string | null;
   discussionName: string | null;
@@ -25,7 +25,7 @@ export function DiscussionContent({
   streamedResponse: string | null;
   streamedModel: string | null;
   isStreaming: boolean;
-  result: string | null;
+  executionError: string | null;
 }) {
   return (
     <main>
@@ -58,13 +58,13 @@ export function DiscussionContent({
       {streamedResponse !== null && (
         <div>
           <h2>
-            Live response{isStreaming ? " (streaming...)" : ""}
+            {isStreaming ? "Live response (streaming...)" : "Response"}
             {streamedModel ? ` — ${streamedModel}` : ""}
           </h2>
           <MarkdownResponse content={streamedResponse} />
         </div>
       )}
-      {result && <pre>{result}</pre>}
+      {executionError && <p>{executionError}</p>}
     </main>
   );
 }

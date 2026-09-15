@@ -152,7 +152,6 @@ export function NotebookCreator({
       {notebookId && (
         <>
           <h2>Add a discussion to this notebook</h2>
-          <p>Notebook: {notebookId}</p>
           <form onSubmit={handleCreateDiscussion}>
             <label>
               Name:{" "}

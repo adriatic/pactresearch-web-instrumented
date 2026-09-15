@@ -25,7 +25,11 @@ interface DiscussionRow {
 
 export function useDiscussionExecution(discussionId: string | null) {
   const [promptText, setPromptText] = useState("");
-  const [result, setResult] = useState<string | null>(null);
+  // Human-readable error text only — never the raw API error payload. Set
+  // on a failed run (from /api/execute's { error, errorId } body, or a
+  // thrown network error) and cleared at the start of every new run and
+  // on discussion switch.
+  const [executionError, setExecutionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [streamedResponse, setStreamedResponse] = useState<string | null>(null);
   const [streamedModel, setStreamedModel] = useState<string | null>(null);
@@ -56,7 +60,7 @@ export function useDiscussionExecution(discussionId: string | null) {
     useState(discussionId);
   if (discussionId !== displayedDiscussionId) {
     setDisplayedDiscussionId(discussionId);
-    setResult(null);
+    setExecutionError(null);
     setStreamedResponse(null);
     setStreamedModel(null);
     setIsStreaming(false);
@@ -156,7 +160,7 @@ export function useDiscussionExecution(discussionId: string | null) {
     e.preventDefault();
     if (!discussionId) return;
     setLoading(true);
-    setResult(null);
+    setExecutionError(null);
     setStreamedResponse(null);
     setStreamedModel(null);
     setIsStreaming(false);
@@ -165,6 +169,11 @@ export function useDiscussionExecution(discussionId: string | null) {
     // Which responses row this run is watching — captured from the first
     // INSERT event, so later UPDATE events for some *other* response on
     // this discussion (a future run) don't get applied to this display.
+    // This is a best-effort live preview only: /api/execute's own fetch
+    // below blocks until the full response is ready and always carries
+    // the authoritative final text, so a Realtime hiccup (a dropped
+    // event, a subscription that never delivers) can only cost the user
+    // the in-progress preview, never the completed response itself.
     let watchedRowId: string | null = null;
 
     const channel = supabase
@@ -217,23 +226,19 @@ export function useDiscussionExecution(discussionId: string | null) {
         });
       });
 
-      // Investigation-only: the client-observed round trip for the whole
-      // POST, diffed against the server's own [timing-full] total for the
-      // same request gives network + Vercel routing overhead, which
-      // otherwise isn't visible from either side alone.
-      const executeFetchStart = performance.now();
       const response = await fetch("/api/execute", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ discussionId, promptText }),
       });
       const body = await response.json();
-      console.log(
-        `[timing-client] POST /api/execute round trip: ${(performance.now() - executeFetchStart).toFixed(1)}ms`,
-      );
-      setResult(JSON.stringify(body, null, 2));
 
       if (response.ok) {
+        // Authoritative final content, independent of whether the
+        // Realtime preview above ever delivered anything.
+        setStreamedResponse(body.response ?? "");
+        setStreamedModel(body.resolved_model ?? null);
+
         // The draft was just promoted into a real cell — clear its
         // persisted copy so switching away and back doesn't resurrect
         // it. Best-effort: a failure here shouldn't overwrite the run's
@@ -247,9 +252,15 @@ export function useDiscussionExecution(discussionId: string | null) {
         } catch {
           // Best-effort cleanup — see comment above.
         }
+      } else {
+        setExecutionError(
+          body.errorId
+            ? `${body.error} (error id: ${body.errorId})`
+            : body.error,
+        );
       }
     } catch (err) {
-      setResult(String(err));
+      setExecutionError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
       setIsStreaming(false);
@@ -260,7 +271,7 @@ export function useDiscussionExecution(discussionId: string | null) {
   return {
     promptText,
     setPromptText,
-    result,
+    executionError,
     loading,
     streamedResponse,
     streamedModel,
