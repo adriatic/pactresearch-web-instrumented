@@ -162,7 +162,13 @@ test("a successful run never shows the raw JSON result block", async ({
     page.waitForResponse((r) => r.url().includes("/api/execute")),
     runButton.click(),
   ]);
-  await expect(runButton).toBeEnabled();
+  // Not toBeEnabled(): a successful run clears the composer (see the
+  // persistence-audit fix to run()), so Run correctly goes back to
+  // disabled -- an empty composer, not a stuck loading state. Loading
+  // itself finishing is confirmed by the "Running..." label being gone.
+  await expect(runButton).not.toHaveText("Running...");
+  await expect(runButton).toBeDisabled();
+  await expect(composer).toHaveValue("");
 
   // The real fix: the response must actually render as markdown, sourced
   // from /api/execute's own body -- not merely "no raw JSON block".

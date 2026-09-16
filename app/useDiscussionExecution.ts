@@ -70,8 +70,34 @@ export function useDiscussionExecution(discussionId: string | null) {
   // without a stale closure — promptText changes on every keystroke, but
   // that effect only re-runs when discussionId itself changes.
   const promptTextRef = useRef(promptText);
+
+  // Which discussion's own content promptText currently, genuinely
+  // represents — distinct from activeDiscussionIdRef below, which tracks
+  // which discussion is *claimed* as outgoing regardless of whether the
+  // user (or its own load) ever actually produced real content for it.
+  // Updated below, alongside promptTextRef, to activeDiscussionIdRef's
+  // *current* value every time promptText actually changes for any
+  // reason — the user typing (by far the common case: the composer's
+  // onChange fires setPromptText directly, with no connection to
+  // saveThenLoad at all) just as much as a load completing or run()'s
+  // post-success clear. Deliberately not narrower (e.g. only updated from
+  // saveThenLoad's own completion): an earlier version of this fix did
+  // that and broke the single most basic case it needed to preserve --
+  // typing a real draft into a discussion whose own background load
+  // hadn't technically finished yet still got silently dropped on the
+  // next switch, because nothing had ever marked that discussion as the
+  // content's genuine owner. What this guards against is the opposite,
+  // rarer case: switching through several discussions fast enough that
+  // an intermediate one's own load is interrupted *and* the user never
+  // typed anything into it either -- then promptText never changes while
+  // it's nominally active, this ref is never touched, and it keeps
+  // pointing at whichever discussion's content is still actually
+  // displayed. null when promptText represents nothing real yet (initial
+  // mount, or no discussion selected).
+  const promptTextOwnerRef = useRef<string | null>(null);
   useEffect(() => {
     promptTextRef.current = promptText;
+    promptTextOwnerRef.current = activeDiscussionIdRef.current;
   }, [promptText]);
 
   // Which discussion is currently "claimed" as active by this effect —
@@ -103,6 +129,18 @@ export function useDiscussionExecution(discussionId: string | null) {
       const switchStartedAt = performance.now();
       const outgoingDiscussionId = activeDiscussionIdRef.current;
       const outgoingDraft = promptTextRef.current;
+      // True only if promptText's current value genuinely belongs to
+      // outgoingDiscussionId (its own completed load, a user keystroke
+      // typed while it was active, or its own run() clear) — not
+      // leftover from whichever discussion was active before it, which
+      // happens when this same discussion is switched away from again
+      // before its own saveThenLoad ever got a chance to load its data
+      // *and* the user never typed anything into it either. Saving in
+      // that case would silently overwrite this discussion's real,
+      // correct draft (typically null/none) with someone else's
+      // unrelated content.
+      const outgoingDraftIsValid =
+        promptTextOwnerRef.current === outgoingDiscussionId;
       activeDiscussionIdRef.current = discussionId;
 
       // outgoingDiscussionId === discussionId means this invocation isn't
@@ -110,7 +148,11 @@ export function useDiscussionExecution(discussionId: string | null) {
       // or React Strict Mode's dev-only second invocation of the same
       // target (the first invocation already claimed it). Only a real
       // mismatch is a genuine outgoing discussion to save.
-      if (outgoingDiscussionId && outgoingDiscussionId !== discussionId) {
+      if (
+        outgoingDiscussionId &&
+        outgoingDiscussionId !== discussionId &&
+        outgoingDraftIsValid
+      ) {
         await fetch(`/api/discussions?id=${outgoingDiscussionId}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
@@ -122,6 +164,7 @@ export function useDiscussionExecution(discussionId: string | null) {
 
       if (!discussionId) {
         setPromptText("");
+        promptTextOwnerRef.current = null;
         setHistory([]);
         setDiscussionName(null);
         setLastSwitchDurationMs(performance.now() - switchStartedAt);
@@ -180,6 +223,11 @@ export function useDiscussionExecution(discussionId: string | null) {
   // submit event to preventDefault here.
   async function run() {
     if (!discussionId) return;
+    // Fixed for this call — read once, up front, distinct from
+    // promptTextRef.current below, which keeps tracking live edits made
+    // while this run is in flight (the composer isn't disabled during a
+    // run).
+    const submittedPromptText = promptText;
     setLoading(true);
     setExecutionError(null);
     setStreamedResponse(null);
@@ -250,7 +298,7 @@ export function useDiscussionExecution(discussionId: string | null) {
       const response = await fetch("/api/execute", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ discussionId, promptText }),
+        body: JSON.stringify({ discussionId, promptText: submittedPromptText }),
       });
       const body = await response.json();
 
@@ -260,10 +308,24 @@ export function useDiscussionExecution(discussionId: string | null) {
         setStreamedResponse(body.response ?? "");
         setStreamedModel(body.resolved_model ?? null);
 
-        // The draft was just promoted into a real cell — clear its
-        // persisted copy so switching away and back doesn't resurrect
-        // it. Best-effort: a failure here shouldn't overwrite the run's
-        // own result with an unrelated cleanup error.
+        // The draft was just promoted into a real cell — clear both its
+        // persisted copy (below) and the client-side state itself, the
+        // same way, in the same place. Previously only the persisted
+        // copy was cleared; the client-side value survived and looked
+        // cleared only by accident, because the very next discussion
+        // switch's own outgoing-draft save re-persisted that same stale
+        // text right back (see 3a02b68's investigation notes) — a
+        // passing invariant by coincidence, not by design. Only clears
+        // if the composer still holds exactly what was just submitted:
+        // if the user has already started typing something new while
+        // this run was in flight (the composer isn't disabled during a
+        // run), that's real, unsent content and must not be wiped.
+        if (promptTextRef.current === submittedPromptText) {
+          setPromptText("");
+        }
+
+        // Best-effort: a failure here shouldn't overwrite the run's own
+        // result with an unrelated cleanup error.
         try {
           await fetch(`/api/discussions?id=${discussionId}`, {
             method: "PATCH",
