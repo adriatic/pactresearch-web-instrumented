@@ -154,12 +154,10 @@ test("the composer and Explorer sidebar stay fixed and visible when discussion c
   // and discussion link remained visible throughout without the test
   // ever needing to scroll the page itself to re-find them.
   const contentScrolls = await page.evaluate(() => {
-    const heading = Array.from(document.querySelectorAll("h1")).find(
-      (el) => el.textContent === "Execute tester",
-    );
-    // h1 -> <main> -> the scrollable wrapper div (overflowY: auto) in
-    // Workspace.tsx.
-    const region = heading?.closest("main")?.parentElement;
+    // <main> (DiscussionContent's own root) -> the scrollable wrapper div
+    // (overflowY: auto) in Workspace.tsx. There's exactly one <main> on
+    // this page.
+    const region = document.querySelector("main")?.parentElement;
     return region ? region.scrollHeight > region.clientHeight : false;
   });
   expect(contentScrolls).toBe(true);

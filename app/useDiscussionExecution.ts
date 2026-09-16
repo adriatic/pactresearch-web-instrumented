@@ -15,6 +15,7 @@ export interface PastResponse {
   prompt_text: string;
   response: string | null;
   resolved_model: string | null;
+  created_at: string;
 }
 
 interface DiscussionRow {
@@ -323,6 +324,7 @@ export function useDiscussionExecution(discussionId: string | null) {
         // data, never a second, conflicting source of truth for it.
         if (
           body.response_row_id &&
+          body.response_created_at &&
           discussionId === activeDiscussionIdRef.current
         ) {
           setHistory((prev) => [
@@ -332,6 +334,7 @@ export function useDiscussionExecution(discussionId: string | null) {
               prompt_text: submittedPromptText,
               response: body.response ?? "",
               resolved_model: body.resolved_model ?? null,
+              created_at: body.response_created_at,
             },
           ]);
         }

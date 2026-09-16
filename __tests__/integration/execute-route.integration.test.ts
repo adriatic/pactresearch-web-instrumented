@@ -403,6 +403,12 @@ describe("POST /api/execute", () => {
     // switch's own fetch.
     expect(parsed.response_row_id).toBe(responseRows?.[0].id);
 
+    // Display cleanup: the client shows this timestamp next to
+    // "Discussion: {name}" -- must be the row's own database-assigned
+    // created_at (set at message_start, near the start of generation),
+    // never an approximation of when this request happened to finish.
+    expect(parsed.response_created_at).toBe(responseRows?.[0].created_at);
+
     const { data: lockRows, error: lockError } = await admin
       .from("execution_locks")
       .select("*")

@@ -122,7 +122,7 @@ test("running two prompts in the same discussion without switching away shows bo
         resolved_model: "claude-sonnet-4-6-mock",
         cell_type: "assistant",
       })
-      .select("id")
+      .select("id, created_at")
       .single();
     if (error) throw error;
 
@@ -133,6 +133,7 @@ test("running two prompts in the same discussion without switching away shows bo
         response: isFirst ? firstResponse : secondResponse,
         resolved_model: "claude-sonnet-4-6-mock",
         response_row_id: inserted!.id,
+        response_created_at: inserted!.created_at,
       }),
     });
   });

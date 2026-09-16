@@ -149,6 +149,7 @@ async function handlePost(timer: HandlerTimer, request: Request) {
     let resolvedModel: string | null = null;
     let accumulatedText = "";
     let responseRowId: string | null = null;
+    let responseCreatedAt: string | null = null;
     // Seeded to "now" rather than 0, so the throttle genuinely applies to
     // the first delta too — otherwise Date.now() - 0 is always well past
     // the threshold and the very first delta bypasses it.
@@ -214,7 +215,7 @@ async function handlePost(timer: HandlerTimer, request: Request) {
                 resolved_model: resolvedModel,
                 cell_type: "assistant",
               })
-              .select("id")
+              .select("id, created_at")
               .single();
             timer.mark(
               "message-start-insert",
@@ -225,6 +226,7 @@ async function handlePost(timer: HandlerTimer, request: Request) {
               throw insertError;
             }
             responseRowId = inserted.id as string;
+            responseCreatedAt = inserted.created_at as string;
             break;
           }
 
@@ -292,7 +294,7 @@ async function handlePost(timer: HandlerTimer, request: Request) {
                   resolved_model: resolvedModel,
                   cell_type: "assistant",
                 })
-                .select("id")
+                .select("id, created_at")
                 .single();
               timer.mark("final-db-write", performance.now() - finalWriteStart);
 
@@ -300,6 +302,7 @@ async function handlePost(timer: HandlerTimer, request: Request) {
                 throw insertError;
               }
               responseRowId = inserted.id as string;
+              responseCreatedAt = inserted.created_at as string;
             } else if (accumulatedText !== lastWrittenText) {
               const { error: updateError } = await supabase
                 .from("responses")
@@ -336,6 +339,14 @@ async function handlePost(timer: HandlerTimer, request: Request) {
       // neither event at all, which the client treats as "nothing to
       // append" rather than assuming a row exists.
       response_row_id: responseRowId,
+      // The row's own database-assigned created_at, set alongside
+      // response_row_id above -- the actual moment this response was
+      // created (near the start of generation, at message_start), not
+      // whenever this request happens to finish returning. Using the
+      // client's own "now" at receipt time here would be a genuinely
+      // wrong timestamp for anything but the fastest responses, not
+      // merely an approximation of a real one.
+      response_created_at: responseCreatedAt,
     });
   } catch (error) {
     // The real cause (Anthropic error body, a Supabase error object, a
