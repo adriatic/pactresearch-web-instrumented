@@ -77,6 +77,27 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
+// Stricter than requireString for the two identifying names this format
+// carries (notebook.name, discussions[].name): a real, well-formed
+// export can never contain an empty one -- both creation paths this app
+// has (the manual create forms, and now the unique-discussion-name
+// constraint) already reject that at the source. An empty string only
+// ever reaches here via a hand-edited or otherwise malformed file, and
+// letting it through used to mean the imported row displayed its own
+// raw uuid in the Explorer tree in place of a name (Explorer.tsx's
+// name-or-id fallback existed for exactly this reason) -- closed here,
+// at the one place that can actually prevent it from being created,
+// rather than only papering over it at display time.
+function requireNonEmptyString(value: unknown, field: string): string {
+  const str = requireString(value, field);
+  if (str.trim().length === 0) {
+    throw new PactExportValidationError(
+      `${field} must not be empty or whitespace-only.`,
+    );
+  }
+  return str;
+}
+
 function requireNullableString(value: unknown, field: string): string | null {
   if (value === null || value === undefined) return null;
   return requireString(value, field);
@@ -112,7 +133,7 @@ export function validatePactExport(data: unknown): PactExport {
     );
   }
   const notebook = {
-    name: requireString(data.notebook.name, "notebook.name"),
+    name: requireNonEmptyString(data.notebook.name, "notebook.name"),
     systemPrompt: requireNullableString(
       data.notebook.systemPrompt,
       "notebook.systemPrompt",
@@ -137,7 +158,7 @@ export function validatePactExport(data: unknown): PactExport {
       }
       return {
         id: requireString(raw.id, `discussions[${index}].id`),
-        name: requireString(raw.name, `discussions[${index}].name`),
+        name: requireNonEmptyString(raw.name, `discussions[${index}].name`),
         createdAt: requireNumber(
           raw.createdAt,
           `discussions[${index}].createdAt`,

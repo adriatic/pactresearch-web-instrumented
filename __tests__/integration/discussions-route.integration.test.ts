@@ -175,6 +175,93 @@ describe("/api/discussions", () => {
     expect(rows?.[0].user_id).toBe(userId);
   });
 
+  // Persistence audit findings B & C: discussion names must be unique
+  // within a notebook, enforced by discussions_notebook_id_normalized_
+  // name_idx (20260916210914), not just NotebookCreator's own separate,
+  // racy client-side check.
+  test("returns 409, and creates nothing, when the notebook already has a discussion with the same name", async () => {
+    const { userId, cookies } = await createSignedInUser();
+    currentCookies = cookies;
+
+    const { data: notebook, error: notebookError } = await admin
+      .from("notebooks")
+      .insert({ user_id: userId, name: "Notebook for dup-name test" })
+      .select()
+      .single();
+    expect(notebookError).toBeNull();
+
+    const first = await POST(
+      makeRequest({ notebookId: notebook!.id, name: "Baseline" }),
+    );
+    expect(first.status).toBe(201);
+
+    const second = await POST(
+      makeRequest({ notebookId: notebook!.id, name: "Baseline" }),
+    );
+    const secondBody = await second.json();
+    expect(second.status).toBe(409);
+    expect(secondBody.error).toBe(
+      'This notebook already has a discussion named "Baseline". Pick a different name.',
+    );
+
+    const { data: rows, error } = await admin
+      .from("discussions")
+      .select("id")
+      .eq("notebook_id", notebook!.id);
+    expect(error).toBeNull();
+    expect(rows).toHaveLength(1);
+  });
+
+  test("the uniqueness constraint is trimmed and case-insensitive, matching the client-side check's own normalization", async () => {
+    const { userId, cookies } = await createSignedInUser();
+    currentCookies = cookies;
+
+    const { data: notebook, error: notebookError } = await admin
+      .from("notebooks")
+      .insert({ user_id: userId, name: "Notebook for normalized dup test" })
+      .select()
+      .single();
+    expect(notebookError).toBeNull();
+
+    const first = await POST(
+      makeRequest({ notebookId: notebook!.id, name: "Baseline" }),
+    );
+    expect(first.status).toBe(201);
+
+    const second = await POST(
+      makeRequest({ notebookId: notebook!.id, name: "  baseline  " }),
+    );
+    expect(second.status).toBe(409);
+  });
+
+  test("the same discussion name is allowed in a different notebook", async () => {
+    const { userId, cookies } = await createSignedInUser();
+    currentCookies = cookies;
+
+    const { data: notebookA, error: notebookAError } = await admin
+      .from("notebooks")
+      .insert({ user_id: userId, name: "Notebook A for cross-notebook test" })
+      .select()
+      .single();
+    expect(notebookAError).toBeNull();
+    const { data: notebookB, error: notebookBError } = await admin
+      .from("notebooks")
+      .insert({ user_id: userId, name: "Notebook B for cross-notebook test" })
+      .select()
+      .single();
+    expect(notebookBError).toBeNull();
+
+    const first = await POST(
+      makeRequest({ notebookId: notebookA!.id, name: "Baseline" }),
+    );
+    expect(first.status).toBe(201);
+
+    const second = await POST(
+      makeRequest({ notebookId: notebookB!.id, name: "Baseline" }),
+    );
+    expect(second.status).toBe(201);
+  });
+
   test("returns 401 when there is no authenticated user", async () => {
     currentCookies = [];
 

@@ -104,14 +104,24 @@ export function NotebookCreator({
     setDiscussionError(null);
 
     try {
-      // UI-level uniqueness check only — there is deliberately no schema
-      // constraint behind this, and it is scoped to this one notebook:
-      // the same discussion name in a *different* notebook is fine. Read
-      // fresh from the server rather than trusting anything cached here,
-      // so a discussion added since this panel opened still counts.
-      // Compared trimmed and case-insensitively: "Baseline" vs
-      // "baseline " is the duplicate a user actually means to be warned
-      // about, not a distinct name.
+      // Optimistic pre-check, not the actual source of truth: this reads
+      // then decides in two separate steps, with nothing atomic tying
+      // them together, so two near-simultaneous submissions (two tabs, a
+      // fast double-submit) could both pass it and still collide. The
+      // real enforcement is the unique index on discussions
+      // (notebook_id, lower(trim(name))) (see 20260916210914) --
+      // POST /api/discussions returns a 409 with this exact same message
+      // shape if this check is ever raced, handled below by the generic
+      // error branch same as any other non-2xx response. This check
+      // exists purely for the fast, no-round-trip-through-a-failed-
+      // create UX in the common, non-raced case. Scoped to this one
+      // notebook, matching the constraint's own scope: the same
+      // discussion name in a *different* notebook is fine. Read fresh
+      // from the server rather than trusting anything cached here, so a
+      // discussion added since this panel opened still counts. Compared
+      // trimmed and case-insensitively, matching the constraint's own
+      // normalization: "Baseline" vs "baseline " is the duplicate a user
+      // actually means to be warned about, not a distinct name.
       const existingResponse = await fetch("/api/discussions");
       if (existingResponse.ok) {
         const existing = (await existingResponse.json()) as

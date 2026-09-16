@@ -31,10 +31,16 @@ export function DiscussionContent({
     <main>
       <h1>Execute tester</h1>
       {discussionId ? (
-        // Falls back to the raw id only in the brief window before its
-        // name has loaded (see useDiscussionExecution's discussionName) —
-        // never a permanent display value.
-        <p>Discussion: {discussionName ?? discussionId}</p>
+        // Persistence audit finding E: previously fell back to the raw
+        // id in the brief window before its name loaded (see
+        // useDiscussionExecution's discussionName) -- self-correcting,
+        // never a permanent display value, but still a uuid rendering as
+        // identifying text for a moment. Replaced with a loading label
+        // instead: nothing about this fix requires a raw id to ever
+        // appear on screen, even transiently, and this audit's whole
+        // premise is that identifying state showing something other than
+        // its real value is worth closing even when it's brief.
+        <p>Discussion: {discussionName ?? "Loading..."}</p>
       ) : (
         <p>No discussion selected — create or pick one above.</p>
       )}

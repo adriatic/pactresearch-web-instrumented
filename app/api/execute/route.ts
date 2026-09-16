@@ -325,6 +325,17 @@ async function handlePost(timer: HandlerTimer, request: Request) {
     return Response.json({
       response: accumulatedText,
       resolved_model: resolvedModel,
+      // The real, persisted responses row this run produced -- lets the
+      // client append this exact entry directly to its in-memory history
+      // instead of only ever learning about it on a future discussion
+      // switch's own fetch (persistence audit finding A). Always set by
+      // this point: the message_start branch above sets it as soon as
+      // the model resolves, and the message_stop branch's own defensive
+      // fallback insert (for the pathological case where message_start
+      // never arrived) sets it too -- null only if the stream produced
+      // neither event at all, which the client treats as "nothing to
+      // append" rather than assuming a row exists.
+      response_row_id: responseRowId,
     });
   } catch (error) {
     // The real cause (Anthropic error body, a Supabase error object, a

@@ -1,0 +1,28 @@
+-- Persistence audit, findings B & C: duplicate discussion names within a
+-- notebook were only ever rejected client-side (NotebookCreator's own
+-- separate GET-then-POST check), never enforced by the database itself.
+-- That left a genuine TOCTOU race -- two near-simultaneous creation
+-- attempts (two tabs, or a fast double-submit slipping past the
+-- in-flight guard) could both pass the client-side check and both
+-- succeed -- and import performed no check at all, so a .pact file with
+-- two same-named discussions in one notebook imported silently.
+--
+-- Scoped to notebook_id, not globally: the same discussion name in a
+-- different notebook is intentionally fine, matching the client-side
+-- check's own scoping and this app's product decision (see
+-- NotebookCreator's discussion-name validation, added in d80bffb).
+--
+-- lower(trim(name)) matches the client-side check's own normalization
+-- exactly ("Baseline" and "baseline " are the same duplicate a user
+-- means to be warned about) -- a plain UNIQUE column constraint can't
+-- express that, so this is a unique index over the normalized
+-- expression instead. discussions.name is `text not null` (see
+-- 20260825032825), so no null-handling case exists here.
+--
+-- If this fails to apply because a notebook already has two discussions
+-- whose names collide under this normalization, that reflects real
+-- pre-existing duplicate data (from before this constraint existed) that
+-- needs a one-time manual rename before this migration can be applied --
+-- not something to silently resolve as part of a schema change.
+create unique index discussions_notebook_id_normalized_name_idx
+  on public.discussions (notebook_id, lower(trim(name)));

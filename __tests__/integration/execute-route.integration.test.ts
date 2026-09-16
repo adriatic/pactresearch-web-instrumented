@@ -397,6 +397,12 @@ describe("POST /api/execute", () => {
     expect(responseRows?.[0].resolved_model).toBe(mockAnthropicStreamedModel);
     expect(responseRows?.[0].response).toBe(mockAnthropicStreamedText);
 
+    // Persistence audit finding A: the client needs the real row id to
+    // append this run directly into its own in-memory history, instead
+    // of only learning about it via a future, unrelated discussion
+    // switch's own fetch.
+    expect(parsed.response_row_id).toBe(responseRows?.[0].id);
+
     const { data: lockRows, error: lockError } = await admin
       .from("execution_locks")
       .select("*")

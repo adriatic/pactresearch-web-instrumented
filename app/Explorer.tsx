@@ -256,7 +256,14 @@ export function Explorer({
           return {
             kind: "notebook",
             notebookId: notebook.id,
-            name: notebook.name || notebook.id,
+            // Falls back to a placeholder, never the raw id -- a
+            // notebook's own uuid is meaningless to a user and was
+            // previously shown here for anything imported from a .pact
+            // file with an empty-string name (now rejected at import
+            // validation, see lib/pactExport.ts, but this stays as a
+            // display-layer guard regardless of how an empty name might
+            // reach the database).
+            name: notebook.name || "Untitled notebook",
           };
         }
         const discussion = discussions.find((d) => d.id === itemId);
@@ -265,7 +272,7 @@ export function Explorer({
             kind: "discussion",
             discussionId: discussion.id,
             notebookId: discussion.notebook_id,
-            name: discussion.name || discussion.id,
+            name: discussion.name || "Untitled discussion",
           };
         }
         return { kind: "root" };

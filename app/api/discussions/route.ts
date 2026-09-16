@@ -65,6 +65,24 @@ async function handlePost(request: Request) {
     .single();
 
   if (insertError) {
+    // 23505 = unique_violation, from discussions_notebook_id_normalized_
+    // name_idx (see 20260916210914) -- this is the authoritative,
+    // race-proof enforcement of the same rule NotebookCreator's own
+    // client-side check applies optimistically before ever reaching this
+    // route. That earlier check is real UX (instant feedback, no round
+    // trip through a failed create), but it reads and decides in two
+    // separate steps with nothing atomic tying them together, so it
+    // can't be the actual source of truth -- two near-simultaneous
+    // requests (two tabs, or a fast double-submit) could both pass it.
+    // This is what makes the rule actually hold.
+    if (insertError.code === "23505") {
+      return Response.json(
+        {
+          error: `This notebook already has a discussion named "${name.trim()}". Pick a different name.`,
+        },
+        { status: 409 },
+      );
+    }
     throw insertError;
   }
 

@@ -71,6 +71,35 @@ async function handlePost(request: Request) {
     importedNotebookName = `${pactExport.notebook.name} ${suffix}`;
   }
 
+  // Persistence audit finding C: a .pact file can legitimately contain
+  // two discussions with the same name in one notebook -- most plausibly
+  // data exported before the discussions_notebook_id_normalized_name_idx
+  // constraint (20260916210914) existed, since the app itself has never
+  // allowed creating that state since. Rejecting the whole import
+  // outright would block genuinely recoverable older data with no path
+  // forward; auto-renaming mirrors exactly how a notebook-name collision
+  // is already handled below, for the same reason -- collisions resolve
+  // automatically rather than failing the import. Only intra-file
+  // collisions are possible here: import always creates a brand-new
+  // notebook, so there's nothing already in the database to collide
+  // with. Same placeholder-behavior caveat as the notebook-name handling
+  // below -- an interactive rename popup is future work, not this fix.
+  // Normalized the same way the unique index itself is (trimmed,
+  // case-insensitive), so a resolved name here can never collide with
+  // that constraint at insert time.
+  const takenDiscussionNames = new Set<string>();
+  const resolvedDiscussionNames = new Map<string, string>();
+  for (const discussion of pactExport.discussions) {
+    let resolvedName = discussion.name;
+    let normalized = resolvedName.trim().toLowerCase();
+    for (let suffix = 1; takenDiscussionNames.has(normalized); suffix += 1) {
+      resolvedName = `${discussion.name} ${suffix}`;
+      normalized = resolvedName.trim().toLowerCase();
+    }
+    takenDiscussionNames.add(normalized);
+    resolvedDiscussionNames.set(discussion.id, resolvedName);
+  }
+
   // Imported notebooks are never system notebooks, and never carry the
   // original's timestamps -- this is a fresh instance, not a restore.
   const { data: insertedNotebook, error: notebookError } = await supabase
@@ -97,7 +126,7 @@ async function handlePost(request: Request) {
           id: discussionIdMap.get(discussion.id),
           notebook_id: newNotebookId,
           user_id: user.id,
-          name: discussion.name,
+          name: resolvedDiscussionNames.get(discussion.id),
           total_time_ms: discussion.totalTimeMs,
           created_at: new Date(discussion.createdAt).toISOString(),
         })),

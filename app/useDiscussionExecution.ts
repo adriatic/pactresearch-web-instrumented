@@ -308,6 +308,34 @@ export function useDiscussionExecution(discussionId: string | null) {
         setStreamedResponse(body.response ?? "");
         setStreamedModel(body.resolved_model ?? null);
 
+        // Reflects the just-completed run directly into history, rather
+        // than leaving it visible only via the "Live response" section
+        // above (itself overwritten by the *next* run) until some later,
+        // unrelated discussion switch happens to refetch it (persistence
+        // audit finding A). Guarded on discussionId still matching the
+        // currently active one: nothing prevents switching away from
+        // this discussion before its own run resolves, and appending to
+        // whatever discussion's history is on screen *now* would put
+        // this entry under the wrong one. history's own state naturally
+        // gets replaced wholesale by the authoritative fetch on the next
+        // real load of this discussion (switch or reload), so this is
+        // strictly an earlier, same-session view of the same eventual
+        // data, never a second, conflicting source of truth for it.
+        if (
+          body.response_row_id &&
+          discussionId === activeDiscussionIdRef.current
+        ) {
+          setHistory((prev) => [
+            ...prev,
+            {
+              id: body.response_row_id,
+              prompt_text: submittedPromptText,
+              response: body.response ?? "",
+              resolved_model: body.resolved_model ?? null,
+            },
+          ]);
+        }
+
         // The draft was just promoted into a real cell — clear both its
         // persisted copy (below) and the client-side state itself, the
         // same way, in the same place. Previously only the persisted

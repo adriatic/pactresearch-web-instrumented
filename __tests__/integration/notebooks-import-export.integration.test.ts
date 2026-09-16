@@ -477,4 +477,118 @@ describe("GET /api/notebooks/export + POST /api/notebooks/import", () => {
     );
     expect(cellReferencesUnknownDiscussion.status).toBe(400);
   });
+
+  // Persistence audit finding D: an empty name previously reached the
+  // database via import (validatePactExport only checked the type was a
+  // string, not that it was non-empty), where it displayed as the row's
+  // own raw uuid in the Explorer tree -- closed at the one place that can
+  // actually prevent it from being created, not just papered over at
+  // display time (see Explorer.tsx's placeholder-instead-of-id fallback,
+  // which stays regardless as a display-layer guard).
+  test("rejects a .pact file with an empty or whitespace-only notebook name", async () => {
+    const { cookies } = await createSignedInUser();
+    currentCookies = cookies;
+
+    for (const emptyName of ["", "   "]) {
+      const response = await importPost(
+        makeImportRequest({
+          version: 1,
+          notebook: { name: emptyName, systemPrompt: null },
+          discussions: [],
+          cells: [],
+        }),
+      );
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toMatch(/notebook\.name/);
+    }
+  });
+
+  test("rejects a .pact file with an empty or whitespace-only discussion name", async () => {
+    const { cookies } = await createSignedInUser();
+    currentCookies = cookies;
+
+    const response = await importPost(
+      makeImportRequest({
+        version: 1,
+        notebook: { name: "Valid notebook name", systemPrompt: null },
+        discussions: [
+          { id: "d1", name: "  ", createdAt: Date.now(), totalTimeMs: 0 },
+        ],
+        cells: [],
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatch(/discussions\[0\]\.name/);
+  });
+
+  // Persistence audit finding C: a .pact file with two discussions
+  // sharing a name in one notebook (plausible for data exported before
+  // discussions_notebook_id_normalized_name_idx, 20260916210914, existed)
+  // must not fail the whole import or silently violate that constraint --
+  // auto-renamed the same way a notebook-name collision already is.
+  test("auto-renames duplicate discussion names within an imported file, scoped per notebook", async () => {
+    const { userId, cookies } = await createSignedInUser();
+    currentCookies = cookies;
+
+    const response = await importPost(
+      makeImportRequest({
+        version: 1,
+        notebook: {
+          name: "Notebook with dup discussion names",
+          systemPrompt: null,
+        },
+        discussions: [
+          { id: "d1", name: "Baseline", createdAt: Date.now(), totalTimeMs: 0 },
+          { id: "d2", name: "Baseline", createdAt: Date.now(), totalTimeMs: 0 },
+          // Case/whitespace variant -- must be caught by the same
+          // normalization the unique index itself uses, not just an
+          // exact-string match.
+          {
+            id: "d3",
+            name: "  baseline  ",
+            createdAt: Date.now(),
+            totalTimeMs: 0,
+          },
+          { id: "d4", name: "Distinct", createdAt: Date.now(), totalTimeMs: 0 },
+        ],
+        cells: [],
+      }),
+    );
+    expect(response.status).toBe(201);
+    const insertedNotebook = await response.json();
+
+    const { data: rows, error } = await admin
+      .from("discussions")
+      .select("name")
+      .eq("notebook_id", insertedNotebook.id)
+      .order("created_at", { ascending: true });
+    expect(error).toBeNull();
+    expect(rows).toHaveLength(4);
+    const names = rows!.map((r) => r.name);
+    // Every name distinct -- no two entries collide under the
+    // constraint's own normalization -- and the resolution is
+    // deterministic in file order. The resolved name is built from each
+    // discussion's own original (untrimmed) name, matching the existing
+    // notebook-name collision handling's own precedent (it appends to
+    // pactExport.notebook.name directly, not a normalized copy of it) --
+    // so d3's "  baseline  " resolves against its own literal text, not
+    // a cleaned-up "Baseline".
+    expect(new Set(names.map((n) => n.trim().toLowerCase())).size).toBe(4);
+    expect(names).toEqual([
+      "Baseline",
+      "Baseline 1",
+      "  baseline   1",
+      "Distinct",
+    ]);
+
+    // The import actually succeeded at the database level -- the unique
+    // index was never violated, proving the auto-rename genuinely
+    // resolved the collision rather than coincidentally not being hit.
+    const { data: notebookRow } = await admin
+      .from("notebooks")
+      .select("user_id")
+      .eq("id", insertedNotebook.id)
+      .single();
+    expect(notebookRow!.user_id).toBe(userId);
+  });
 });
