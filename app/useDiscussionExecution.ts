@@ -139,7 +139,26 @@ export function useDiscussionExecution(discussionId: string | null) {
 
       setHistory(historyBody);
       const loadedDiscussion = (discussionsBody as DiscussionRow[])[0];
-      setPromptText(loadedDiscussion?.draft_prompt_text ?? "");
+      // An actual unsent draft always wins — it may well differ from any
+      // cell's prompt (the user started typing something new). Absent
+      // one, fall back to the most recently run cell's own prompt_text
+      // (history is ordered oldest-first, so the last entry is the most
+      // recent) rather than leaving the composer blank. Without this, any
+      // discussion loaded fresh — a normal switch/reload after a
+      // successful run clears draft_prompt_text by design (see run()'s
+      // cleanup below), and an imported discussion never had one to begin
+      // with — showed an empty composer despite the exact text being
+      // sitting right there in its own history. draft_prompt_text can
+      // only ever be a non-empty string or null (the switch-save below
+      // uses `|| null`, never persisting ""), so `??` alone is enough to
+      // tell "no draft" from "an intentionally short draft".
+      const lastCellPromptText =
+        historyBody.length > 0
+          ? (historyBody[historyBody.length - 1] as PastResponse).prompt_text
+          : null;
+      setPromptText(
+        loadedDiscussion?.draft_prompt_text ?? lastCellPromptText ?? "",
+      );
       setDiscussionName(loadedDiscussion?.name ?? null);
       // This still measures state being set, not paint — React commits the
       // corresponding DOM update in the very next (synchronous, no
