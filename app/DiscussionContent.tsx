@@ -16,6 +16,7 @@ export function DiscussionContent({
   history,
   streamedResponse,
   streamedModel,
+  streamedResponseCreatedAt,
   isStreaming,
   executionError,
 }: {
@@ -24,18 +25,10 @@ export function DiscussionContent({
   history: PastResponse[];
   streamedResponse: string | null;
   streamedModel: string | null;
+  streamedResponseCreatedAt: string | null;
   isStreaming: boolean;
   executionError: string | null;
 }) {
-  // The most recently created response currently on screen -- history is
-  // ordered oldest-first (see saveThenLoad's fetch), and a just-completed
-  // run is appended to this same array as soon as it succeeds (see
-  // run()'s history append), so the last entry is always the right one
-  // to show a timestamp for, whether it arrived via a page load or a
-  // run in the current session.
-  const mostRecentResponse =
-    history.length > 0 ? history[history.length - 1] : null;
-
   return (
     <main>
       {discussionId ? (
@@ -48,11 +41,7 @@ export function DiscussionContent({
         // appear on screen, even transiently, and this audit's whole
         // premise is that identifying state showing something other than
         // its real value is worth closing even when it's brief.
-        <p>
-          Discussion: {discussionName ?? "Loading..."}
-          {mostRecentResponse &&
-            ` — Response: ${new Date(mostRecentResponse.created_at).toLocaleString()}`}
-        </p>
+        <p>Discussion: {discussionName ?? "Loading..."}</p>
       ) : (
         <p>No discussion selected — create or pick one above.</p>
       )}
@@ -65,7 +54,13 @@ export function DiscussionContent({
               </p>
               <p>
                 <strong>Response</strong>
-                {entry.resolved_model ? ` — ${entry.resolved_model}` : ""}:
+                {entry.resolved_model ? ` — ${entry.resolved_model}` : ""}
+                {/* Each entry's own created_at, not a single header-level
+                    value -- 7986c92 originally put this on the
+                    "Discussion:" line sourced from the *latest* response,
+                    which stayed wrong for every older entry once you
+                    scrolled past it. */}
+                {` — ${new Date(entry.created_at).toLocaleString()}`}:
               </p>
               <MarkdownResponse content={entry.response ?? ""} />
             </div>
@@ -77,6 +72,8 @@ export function DiscussionContent({
           <h2>
             {isStreaming ? "Live response (streaming...)" : "Response"}
             {streamedModel ? ` — ${streamedModel}` : ""}
+            {streamedResponseCreatedAt &&
+              ` — ${new Date(streamedResponseCreatedAt).toLocaleString()}`}
           </h2>
           <MarkdownResponse content={streamedResponse} />
         </div>

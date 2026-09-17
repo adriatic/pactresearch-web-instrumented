@@ -238,6 +238,7 @@ export function Workspace({
               history={execution.history}
               streamedResponse={execution.streamedResponse}
               streamedModel={execution.streamedModel}
+              streamedResponseCreatedAt={execution.streamedResponseCreatedAt}
               isStreaming={execution.isStreaming}
               executionError={execution.executionError}
             />

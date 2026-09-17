@@ -34,6 +34,9 @@ export function useDiscussionExecution(discussionId: string | null) {
   const [loading, setLoading] = useState(false);
   const [streamedResponse, setStreamedResponse] = useState<string | null>(null);
   const [streamedModel, setStreamedModel] = useState<string | null>(null);
+  const [streamedResponseCreatedAt, setStreamedResponseCreatedAt] = useState<
+    string | null
+  >(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [history, setHistory] = useState<PastResponse[]>([]);
   // The active discussion's own name, loaded alongside its draft — real
@@ -64,6 +67,7 @@ export function useDiscussionExecution(discussionId: string | null) {
     setExecutionError(null);
     setStreamedResponse(null);
     setStreamedModel(null);
+    setStreamedResponseCreatedAt(null);
     setIsStreaming(false);
   }
 
@@ -233,6 +237,7 @@ export function useDiscussionExecution(discussionId: string | null) {
     setExecutionError(null);
     setStreamedResponse(null);
     setStreamedModel(null);
+    setStreamedResponseCreatedAt(null);
     setIsStreaming(false);
 
     const supabase = createClient();
@@ -261,6 +266,7 @@ export function useDiscussionExecution(discussionId: string | null) {
           watchedRowId = payload.new.id;
           setStreamedModel(payload.new.resolved_model ?? null);
           setStreamedResponse(payload.new.response ?? "");
+          setStreamedResponseCreatedAt(payload.new.created_at ?? null);
           setIsStreaming(true);
         },
       )
@@ -308,6 +314,7 @@ export function useDiscussionExecution(discussionId: string | null) {
         // Realtime preview above ever delivered anything.
         setStreamedResponse(body.response ?? "");
         setStreamedModel(body.resolved_model ?? null);
+        setStreamedResponseCreatedAt(body.response_created_at ?? null);
 
         // Reflects the just-completed run directly into history, rather
         // than leaving it visible only via the "Live response" section
@@ -389,6 +396,7 @@ export function useDiscussionExecution(discussionId: string | null) {
     loading,
     streamedResponse,
     streamedModel,
+    streamedResponseCreatedAt,
     isStreaming,
     history,
     run,
