@@ -1,6 +1,8 @@
 import { createClient } from "@/utils/supabase/server";
 import { withRouteErrorHandling } from "@/lib/withRouteErrorHandling";
-import { withFullTiming, type HandlerTimer } from "@/lib/timing";
+import { trace, context } from "@opentelemetry/api";
+
+const tracer = trace.getTracer("pact-api");
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_MODEL = "claude-sonnet-4-6";
@@ -27,13 +29,19 @@ interface ExecuteRequestBody {
   promptText: string;
 }
 
-async function handlePost(timer: HandlerTimer, request: Request) {
+async function handlePost(request: Request) {
   const supabase = await createClient();
-  const authStart = performance.now();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  timer.mark("auth", performance.now() - authStart);
+
+  const user = await tracer.startActiveSpan("auth", async (span) => {
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      return user;
+    } finally {
+      span.end();
+    }
+  });
 
   if (!user) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -56,7 +64,11 @@ async function handlePost(timer: HandlerTimer, request: Request) {
   } catch {
     return Response.json({ error: "Malformed request body." }, { status: 400 });
   }
-  timer.setLabel(`POST /api/execute discussionId=${discussionId}`);
+  // Attaches to the automatic root span @vercel/otel creates for this
+  // route invocation -- an attribute, not part of the span name, since
+  // high-cardinality values (a per-request uuid) belong on attributes,
+  // not names. Replaces the old HandlerTimer.setLabel mechanism.
+  trace.getActiveSpan()?.setAttribute("pact.discussion_id", discussionId);
 
   if (typeof promptText !== "string" || promptText.trim().length === 0) {
     return Response.json(
@@ -65,12 +77,20 @@ async function handlePost(timer: HandlerTimer, request: Request) {
     );
   }
 
-  const lockAcquireStart = performance.now();
-  const { data: acquired, error: lockError } = await supabase.rpc(
-    "try_acquire_execution_lock",
-    { p_user_id: user.id, p_discussion_id: discussionId },
+  const { acquired, lockError } = await tracer.startActiveSpan(
+    "lock-acquire",
+    async (span) => {
+      try {
+        const { data, error } = await supabase.rpc(
+          "try_acquire_execution_lock",
+          { p_user_id: user.id, p_discussion_id: discussionId },
+        );
+        return { acquired: data, lockError: error };
+      } finally {
+        span.end();
+      }
+    },
   );
-  timer.mark("lock-acquire", performance.now() - lockAcquireStart);
 
   if (lockError) {
     throw lockError;
@@ -83,55 +103,85 @@ async function handlePost(timer: HandlerTimer, request: Request) {
     );
   }
 
+  // time-to-first-token's own lifetime spans multiple iterations of the
+  // SSE read loop below (from the Anthropic fetch call until the first
+  // real text_delta), so it can't be a single startActiveSpan callback the
+  // way the other phases are -- it's opened here and closed wherever the
+  // first token actually arrives (or, failing that, in the outer finally
+  // below). ttftCtx is what anthropic-connect and message-start-insert
+  // are created inside of, so they register as its children rather than
+  // as siblings under the route's root span -- ttft *contains* both of
+  // them (confirmed against task 12's data: connect + insert account for
+  // essentially all of the old flat ttfb mark, to within ~1ms), it isn't
+  // a third phase alongside them.
+  const ttftStartDate = Date.now();
+  const ttftSpan = tracer.startSpan("time-to-first-token", {
+    startTime: ttftStartDate,
+  });
+  const ttftCtx = trace.setSpan(context.active(), ttftSpan);
+  let ttftEnded = false;
+  function endTtft(endDate?: number) {
+    if (!ttftEnded) {
+      ttftEnded = true;
+      ttftSpan.end(endDate);
+    }
+  }
+
   try {
     // Global, admin-configurable cap (see app_settings / 20260913035840)
     // -- replaces the old hardcoded max_tokens: 1000, which is exactly
     // what caused the truncated long responses found in the earlier
     // timing investigation. A missing/unreadable settings row falls back
     // to that same old value rather than failing the run.
-    const settingsReadStart = performance.now();
-    let maxTokens = FALLBACK_MAX_TOKENS;
-    const { data: settings, error: settingsError } = await supabase
-      .from("app_settings")
-      .select("max_tokens")
-      .eq("id", 1)
-      .maybeSingle();
-    timer.mark("settings-read", performance.now() - settingsReadStart);
+    const maxTokens = await tracer.startActiveSpan(
+      "settings-read",
+      async (span) => {
+        try {
+          const { data: settings, error: settingsError } = await supabase
+            .from("app_settings")
+            .select("max_tokens")
+            .eq("id", 1)
+            .maybeSingle();
 
-    if (settingsError || !settings) {
-      console.error(
-        `[app-settings-fallback] Could not read app_settings (id=1) -- falling back to max_tokens=${FALLBACK_MAX_TOKENS}.`,
-        settingsError ?? "no row found",
-      );
-    } else {
-      maxTokens = settings.max_tokens;
-    }
-
-    // Investigation-only timing (kept permanently, same call as the
-    // discussion-switch instrumentation: cheap, and this is the app's
-    // actual core operation). anthropicFetchStart is the reference point
-    // for both "time to establish the connection" (this await resolving —
-    // stream:true means it resolves once headers arrive, not the full
-    // body) and "time to first token" (first real text_delta), measured
-    // separately below.
-    const anthropicFetchStart = performance.now();
-    const anthropicResponse = await fetch(ANTHROPIC_API_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
+          if (settingsError || !settings) {
+            console.error(
+              `[app-settings-fallback] Could not read app_settings (id=1) -- falling back to max_tokens=${FALLBACK_MAX_TOKENS}.`,
+              settingsError ?? "no row found",
+            );
+            return FALLBACK_MAX_TOKENS;
+          }
+          return settings.max_tokens;
+        } finally {
+          span.end();
+        }
       },
-      body: JSON.stringify({
-        model: ANTHROPIC_MODEL,
-        max_tokens: maxTokens,
-        stream: true,
-        messages: [{ role: "user", content: promptText }],
+    );
+
+    const anthropicResponse = await context.with(ttftCtx, () =>
+      tracer.startActiveSpan("anthropic-connect", async (span) => {
+        try {
+          return await fetch(ANTHROPIC_API_URL, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-api-key": apiKey,
+              "anthropic-version": "2023-06-01",
+            },
+            body: JSON.stringify({
+              model: ANTHROPIC_MODEL,
+              max_tokens: maxTokens,
+              stream: true,
+              messages: [{ role: "user", content: promptText }],
+            }),
+          });
+        } finally {
+          span.end();
+        }
       }),
-    });
-    timer.mark("anthropic-connect", performance.now() - anthropicFetchStart);
+    );
 
     if (!anthropicResponse.ok || !anthropicResponse.body) {
+      endTtft();
       // Anthropic's error responses are a JSON body describing exactly what
       // went wrong (bad/expired key, invalid_request_error for a bad
       // param, rate limit, etc.) -- read it now, while the response is
@@ -156,12 +206,15 @@ async function handlePost(timer: HandlerTimer, request: Request) {
     let lastWriteAt = Date.now();
     let lastWrittenText = "";
 
-    // Streaming-phase timing state — first token marks the end of TTFB
-    // and the start of "generation"; the write counters give a cheap
-    // aggregate view of the throttled-UPDATE cost without logging every
-    // single one individually (which would be excessive for a response
-    // that can throttle-write dozens of times).
-    let firstTokenAt: number | null = null;
+    // Streaming-phase timing state — firstTokenAtDate marks the end of
+    // time-to-first-token and the start of generation. The write
+    // counters feed the throttled-writes span's attributes (a single
+    // aggregated span, not one child span per write — see task 13/14: at
+    // up to ~300 writes for one long response, per-write spans would be
+    // real clutter in the waterfall for no diagnostic value beyond what
+    // count/total/avg already give).
+    let firstTokenAtDate: number | null = null;
+    let firstWriteAtDate: number | null = null;
     let streamingWriteCount = 0;
     let streamingWriteTotalMs = 0;
 
@@ -202,29 +255,34 @@ async function handlePost(timer: HandlerTimer, request: Request) {
 
             // The row a Realtime subscriber would attach to — created as
             // soon as we know the resolved model, before any content has
-            // arrived.
-            const messageStartInsertStart = performance.now();
-            const { data: inserted, error: insertError } = await supabase
-              .from("responses")
-              .insert({
-                discussion_id: discussionId,
-                user_id: user.id,
-                prompt_text: promptText,
-                response: null,
-                model: ANTHROPIC_MODEL,
-                resolved_model: resolvedModel,
-                cell_type: "assistant",
-              })
-              .select("id, created_at")
-              .single();
-            timer.mark(
-              "message-start-insert",
-              performance.now() - messageStartInsertStart,
+            // arrived. A child of time-to-first-token, not of
+            // anthropic-connect (which has already ended by this point) —
+            // both are ttft's own children, not nested under each other.
+            const inserted = await context.with(ttftCtx, () =>
+              tracer.startActiveSpan("message-start-insert", async (span) => {
+                try {
+                  const { data, error: insertError } = await supabase
+                    .from("responses")
+                    .insert({
+                      discussion_id: discussionId,
+                      user_id: user.id,
+                      prompt_text: promptText,
+                      response: null,
+                      model: ANTHROPIC_MODEL,
+                      resolved_model: resolvedModel,
+                      cell_type: "assistant",
+                    })
+                    .select("id, created_at")
+                    .single();
+                  if (insertError) {
+                    throw insertError;
+                  }
+                  return data;
+                } finally {
+                  span.end();
+                }
+              }),
             );
-
-            if (insertError) {
-              throw insertError;
-            }
             responseRowId = inserted.id as string;
             responseCreatedAt = inserted.created_at as string;
             break;
@@ -234,9 +292,9 @@ async function handlePost(timer: HandlerTimer, request: Request) {
             const delta = event.delta as
               { type?: string; text?: string } | undefined;
             if (delta?.type === "text_delta" && delta.text) {
-              if (firstTokenAt === null) {
-                firstTokenAt = performance.now();
-                timer.mark("ttfb", firstTokenAt - anthropicFetchStart);
+              if (firstTokenAtDate === null) {
+                firstTokenAtDate = Date.now();
+                endTtft(firstTokenAtDate);
               }
               accumulatedText += delta.text;
             }
@@ -247,6 +305,9 @@ async function handlePost(timer: HandlerTimer, request: Request) {
               accumulatedText !== lastWrittenText &&
               now - lastWriteAt >= STREAM_WRITE_THROTTLE_MS
             ) {
+              if (firstWriteAtDate === null) {
+                firstWriteAtDate = now;
+              }
               const writeStart = performance.now();
               const { error: updateError } = await supabase
                 .from("responses")
@@ -265,57 +326,91 @@ async function handlePost(timer: HandlerTimer, request: Request) {
           }
 
           case "message_stop": {
-            // Generation is measured from the first real token, not from
-            // the Anthropic connect — TTFB and generation are reported as
-            // separate, non-overlapping phases.
-            timer.mark(
-              "generation",
-              performance.now() - (firstTokenAt ?? anthropicFetchStart),
+            // Safety net: only fires if no text_delta ever arrived (an
+            // empty or entirely-non-text response), so ttft wasn't
+            // already ended above.
+            endTtft();
+
+            // Retroactive span: both endpoints (firstTokenAtDate, now)
+            // are already known by the time execution reaches here, so
+            // this is created and ended in one step rather than kept
+            // open across the loop the way time-to-first-token is.
+            // Non-overlapping with time-to-first-token by construction —
+            // confirmed against the route's own logic (this is the same
+            // firstTokenAt-to-message_stop measurement task 13 asked to
+            // re-verify, not a new one).
+            const generationEndDate = Date.now();
+            tracer
+              .startSpan("generation", {
+                startTime: firstTokenAtDate ?? ttftStartDate,
+              })
+              .end(generationEndDate);
+
+            // Aggregated span for every throttled UPDATE this response
+            // made — see the comment above streamingWriteCount for why
+            // this is one span with attributes rather than one span per
+            // write.
+            const writesSpan = tracer.startSpan(
+              "throttled-writes",
+              firstWriteAtDate !== null
+                ? { startTime: firstWriteAtDate }
+                : undefined,
             );
-            console.log(
-              `[timing-detail] streaming writes count=${streamingWriteCount} totalMs=${streamingWriteTotalMs.toFixed(1)}`,
+            writesSpan.setAttributes({
+              "write.count": streamingWriteCount,
+              "write.total_duration_ms": Number(
+                streamingWriteTotalMs.toFixed(1),
+              ),
+              "write.avg_duration_ms":
+                streamingWriteCount > 0
+                  ? Number(
+                      (streamingWriteTotalMs / streamingWriteCount).toFixed(1),
+                    )
+                  : 0,
+            });
+            writesSpan.end(
+              firstWriteAtDate !== null ? generationEndDate : undefined,
             );
 
-            // Final write, unconditional on the throttle, so no trailing
-            // partial batch is lost.
-            const finalWriteStart = performance.now();
-            if (!responseRowId) {
-              // Defensive fallback: message_start never arrived for some
-              // reason, so there's no row yet — create it now instead of
-              // silently dropping the content.
-              const { data: inserted, error: insertError } = await supabase
-                .from("responses")
-                .insert({
-                  discussion_id: discussionId,
-                  user_id: user.id,
-                  prompt_text: promptText,
-                  response: accumulatedText,
-                  model: ANTHROPIC_MODEL,
-                  resolved_model: resolvedModel,
-                  cell_type: "assistant",
-                })
-                .select("id, created_at")
-                .single();
-              timer.mark("final-db-write", performance.now() - finalWriteStart);
-
-              if (insertError) {
-                throw insertError;
+            await tracer.startActiveSpan("final-write", async (span) => {
+              try {
+                // Final write, unconditional on the throttle, so no
+                // trailing partial batch is lost.
+                if (!responseRowId) {
+                  // Defensive fallback: message_start never arrived for
+                  // some reason, so there's no row yet — create it now
+                  // instead of silently dropping the content.
+                  const { data: inserted, error: insertError } = await supabase
+                    .from("responses")
+                    .insert({
+                      discussion_id: discussionId,
+                      user_id: user.id,
+                      prompt_text: promptText,
+                      response: accumulatedText,
+                      model: ANTHROPIC_MODEL,
+                      resolved_model: resolvedModel,
+                      cell_type: "assistant",
+                    })
+                    .select("id, created_at")
+                    .single();
+                  if (insertError) {
+                    throw insertError;
+                  }
+                  responseRowId = inserted.id as string;
+                  responseCreatedAt = inserted.created_at as string;
+                } else if (accumulatedText !== lastWrittenText) {
+                  const { error: updateError } = await supabase
+                    .from("responses")
+                    .update({ response: accumulatedText })
+                    .eq("id", responseRowId);
+                  if (updateError) {
+                    throw updateError;
+                  }
+                }
+              } finally {
+                span.end();
               }
-              responseRowId = inserted.id as string;
-              responseCreatedAt = inserted.created_at as string;
-            } else if (accumulatedText !== lastWrittenText) {
-              const { error: updateError } = await supabase
-                .from("responses")
-                .update({ response: accumulatedText })
-                .eq("id", responseRowId);
-              timer.mark("final-db-write", performance.now() - finalWriteStart);
-
-              if (updateError) {
-                throw updateError;
-              }
-            } else {
-              timer.mark("final-db-write", 0);
-            }
+            });
             break;
           }
 
@@ -372,12 +467,18 @@ async function handlePost(timer: HandlerTimer, request: Request) {
       { status: 500 },
     );
   } finally {
-    const lockReleaseStart = performance.now();
-    await supabase.from("execution_locks").delete().eq("user_id", user.id);
-    timer.mark("lock-release", performance.now() - lockReleaseStart);
+    // Safety net: guarantees ttft is never left open if something threw
+    // before either of the two normal end points (the error check right
+    // after anthropic-connect, or the first text_delta) was reached.
+    endTtft();
+    await tracer.startActiveSpan("lock-release", async (span) => {
+      try {
+        await supabase.from("execution_locks").delete().eq("user_id", user.id);
+      } finally {
+        span.end();
+      }
+    });
   }
 }
 
-export const POST = withRouteErrorHandling(
-  withFullTiming("POST /api/execute", handlePost),
-);
+export const POST = withRouteErrorHandling(handlePost);
