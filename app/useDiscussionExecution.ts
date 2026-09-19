@@ -117,6 +117,25 @@ export function useDiscussionExecution(discussionId: string | null) {
   // happened — exactly the bug this fixes. null on first mount.
   const activeDiscussionIdRef = useRef<string | null>(null);
 
+  // The most recently fired outgoing-draft-save request, if it might
+  // still be in flight — shared across every invocation of the effect
+  // below, not local to any one of them. Needed for a real, confirmed
+  // race: switch away from a discussion (firing its outgoing save),
+  // then switch straight back before that save has actually landed. The
+  // switch-back's own invocation has nothing new to save (the discussion
+  // it's leaving never had its own load validated — see
+  // outgoingDraftIsValid below), so it always used to proceed straight
+  // to reloading the discussion being returned to — racing ahead of the
+  // still-in-flight save and reading the *pre-save* draft_prompt_text,
+  // showing an empty composer even though the save goes on to succeed a
+  // moment later. Nothing ever re-synced afterward, so the empty
+  // composer was permanent until another switch happened to reload it
+  // correctly. Confirmed locally with artificial latency (local dev's
+  // near-zero round trips otherwise make this exact window very hard to
+  // land in) matching real production timing, where an ordinary,
+  // unhurried switch-away-and-back is well within reach of this window.
+  const pendingOutgoingSaveRef = useRef<Promise<unknown> | null>(null);
+
   // Single source of truth for both history and the persisted draft:
   // switching discussions saves the outgoing discussion's draft first —
   // awaited, so switching back can't observe a lost save racing against
@@ -158,11 +177,27 @@ export function useDiscussionExecution(discussionId: string | null) {
         outgoingDiscussionId !== discussionId &&
         outgoingDraftIsValid
       ) {
-        await fetch(`/api/discussions?id=${outgoingDiscussionId}`, {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ draftPromptText: outgoingDraft || null }),
-        });
+        const savePromise = fetch(
+          `/api/discussions?id=${outgoingDiscussionId}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ draftPromptText: outgoingDraft || null }),
+          },
+        );
+        pendingOutgoingSaveRef.current = savePromise;
+        await savePromise;
+      } else if (pendingOutgoingSaveRef.current) {
+        // This invocation has nothing of its own to save, but an earlier
+        // switch's own save may still be in flight -- wait for it before
+        // reading anything below. Otherwise a fast switch-away-then-back
+        // (this invocation is exactly that: outgoingDraftIsValid is false
+        // because the discussion being left never had its own load
+        // validated) can read stale, pre-save data. Harmless to wait on
+        // even when the pending save targets some other discussion
+        // entirely -- it's already resolved or resolving regardless, so
+        // this never blocks on work that wasn't already happening.
+        await pendingOutgoingSaveRef.current;
       }
 
       if (cancelled) return;
