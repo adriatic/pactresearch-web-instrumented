@@ -10,13 +10,27 @@ interface ExistingDiscussion {
 }
 
 export function NotebookCreator({
+  selectedNotebookId,
   onNotebookCreated,
   onDiscussionCreated,
-  lastDeletedNotebookId,
 }: {
-  onNotebookCreated: () => void;
+  // The single source of truth for which notebook "Add a discussion to
+  // this notebook" targets -- owned by Workspace, driven by whatever the
+  // user actually clicked in the Explorer tree (a notebook row directly,
+  // or a discussion, whose own parent notebook counts too), not by
+  // anything this component tracks on its own. Previously this component
+  // kept its own separate notebookId, set only from this component's own
+  // create-notebook success -- meaning the panel always targeted
+  // whichever notebook was most recently *created* through this exact
+  // form, completely ignoring any notebook the user actually clicked
+  // afterward. With two or more notebooks already on screen, clicking an
+  // earlier one and adding a discussion silently created it under the
+  // most-recently-created notebook instead -- confirmed by seeding two
+  // notebooks, clicking the first, and checking the database directly
+  // for where the resulting discussion actually landed.
+  selectedNotebookId: string | null;
+  onNotebookCreated: (notebookId: string) => void;
   onDiscussionCreated: (discussionId: string) => void;
-  lastDeletedNotebookId: string | null;
 }) {
   const [name, setName] = useState("");
   const [category, setCategory] = useState<(typeof CATEGORIES)[number]>(
@@ -28,7 +42,6 @@ export function NotebookCreator({
   // nothing the tree didn't.
   const [notebookError, setNotebookError] = useState<string | null>(null);
   const [notebookLoading, setNotebookLoading] = useState(false);
-  const [notebookId, setNotebookId] = useState<string | null>(null);
 
   const [discussionName, setDiscussionName] = useState("");
   const [discussionError, setDiscussionError] = useState<string | null>(null);
@@ -41,24 +54,23 @@ export function NotebookCreator({
   const notebookInFlight = useRef(false);
   const discussionInFlight = useRef(false);
 
-  // Clears this component's own leftover display when the notebook it
-  // describes was just deleted elsewhere (DiscussionList's delete button,
-  // wired up via Workspace) — not on every delete, only when it's the one
-  // this component is currently showing. Adjusted directly during render
+  // Clears this panel's own leftover input/error whenever the target
+  // notebook itself changes -- for any reason: a different notebook
+  // clicked, the selected one deleted (Workspace nulls selectedNotebookId
+  // the instant that happens, before this ever re-renders with a stale
+  // id), or a fresh notebook just created and auto-selected. A prompt
+  // typed for the *previous* target, or an error message about it, has
+  // no business surviving onto a new one. Adjusted directly during render
   // (React's recommended pattern for "reset state when a prop changes"),
   // not in an effect — an effect here would setState synchronously in its
   // body, triggering an extra, avoidable render pass.
-  const [handledDeletedNotebookId, setHandledDeletedNotebookId] = useState<
-    string | null
-  >(null);
-  if (lastDeletedNotebookId !== handledDeletedNotebookId) {
-    setHandledDeletedNotebookId(lastDeletedNotebookId);
-    if (lastDeletedNotebookId && lastDeletedNotebookId === notebookId) {
-      setNotebookError(null);
-      setNotebookId(null);
-      setDiscussionError(null);
-      setDiscussionName("");
-    }
+  const [handledNotebookId, setHandledNotebookId] = useState<string | null>(
+    selectedNotebookId,
+  );
+  if (selectedNotebookId !== handledNotebookId) {
+    setHandledNotebookId(selectedNotebookId);
+    setDiscussionError(null);
+    setDiscussionName("");
   }
 
   async function handleCreateNotebook(e: React.FormEvent) {
@@ -67,7 +79,6 @@ export function NotebookCreator({
     notebookInFlight.current = true;
     setNotebookLoading(true);
     setNotebookError(null);
-    setNotebookId(null);
 
     try {
       const response = await fetch("/api/notebooks", {
@@ -77,14 +88,15 @@ export function NotebookCreator({
       });
       const body = await response.json();
       if (response.ok) {
-        setNotebookId(body.id);
         // The Explorer tree is now the *only* confirmation a notebook was
         // created (the "Notebook \"X\" created." message is gone), so it
         // has to actually refresh — it previously only refetched when a
         // discussion was created or a notebook deleted, leaving a newly
         // created notebook invisible until something else happened to
-        // trigger a refetch.
-        onNotebookCreated();
+        // trigger a refetch. Reporting the new id up also makes it the
+        // selected notebook, so it's immediately the target for "Add a
+        // discussion" without requiring a separate click on its own row.
+        onNotebookCreated(body.id);
       } else {
         setNotebookError(body.error || "Failed to create notebook.");
       }
@@ -98,7 +110,7 @@ export function NotebookCreator({
 
   async function handleCreateDiscussion(e: React.FormEvent) {
     e.preventDefault();
-    if (!notebookId || discussionInFlight.current) return;
+    if (!selectedNotebookId || discussionInFlight.current) return;
     discussionInFlight.current = true;
     setDiscussionLoading(true);
     setDiscussionError(null);
@@ -129,7 +141,7 @@ export function NotebookCreator({
         const normalized = discussionName.trim().toLowerCase();
         const isDuplicate = (existing ?? []).some(
           (discussion) =>
-            discussion.notebook_id === notebookId &&
+            discussion.notebook_id === selectedNotebookId &&
             (discussion.name ?? "").trim().toLowerCase() === normalized,
         );
         if (isDuplicate) {
@@ -143,7 +155,10 @@ export function NotebookCreator({
       const response = await fetch("/api/discussions", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ notebookId, name: discussionName }),
+        body: JSON.stringify({
+          notebookId: selectedNotebookId,
+          name: discussionName,
+        }),
       });
       const body = await response.json();
       if (response.ok) {
@@ -195,7 +210,7 @@ export function NotebookCreator({
       </form>
       {notebookError && <p>{notebookError}</p>}
 
-      {notebookId && (
+      {selectedNotebookId && (
         <>
           <h2>Add a discussion to this notebook</h2>
           <form onSubmit={handleCreateDiscussion}>

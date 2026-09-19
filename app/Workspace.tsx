@@ -44,17 +44,24 @@ export function Workspace({
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(
     initialDiscussionId,
   );
+  // Which notebook "Add a discussion to this notebook" (NotebookCreator)
+  // targets -- the single source of truth for that, driven by whatever
+  // the user actually selected: clicking a notebook row directly, or a
+  // discussion (whose own parent counts too, see handleDiscussionSelected
+  // below), or a notebook this session just created (see
+  // handleNotebookCreated). Previously NotebookCreator tracked this
+  // itself, from its own create-notebook success only -- meaning the
+  // panel always targeted whichever notebook was most recently *created*
+  // through that one form, silently ignoring any notebook the user
+  // actually clicked afterward once two or more existed.
+  const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(
+    null,
+  );
   // Bumped whenever a discussion is created or a notebook is deleted, so
   // Explorer's effect refetches — it doesn't otherwise depend on anything
   // that changes here.
   const [discussionListRefetchToken, setDiscussionListRefetchToken] =
     useState(0);
-  // Rebroadcast down to NotebookCreator, the same shape as
-  // discussionListRefetchToken above — set here from Explorer's callback,
-  // consumed by whichever child needs to react.
-  const [lastDeletedNotebookId, setLastDeletedNotebookId] = useState<
-    string | null
-  >(null);
   const [importError, setImportError] = useState<string | null>(null);
   const importFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -63,6 +70,23 @@ export function Workspace({
   function handleDiscussionCreated(discussionId: string) {
     setActiveDiscussionId(discussionId);
     setDiscussionListRefetchToken((t) => t + 1);
+  }
+
+  // A newly created notebook becomes the selected one -- immediately the
+  // target for "Add a discussion to this notebook", without requiring a
+  // separate click on its own row first.
+  function handleNotebookCreated(notebookId: string) {
+    setSelectedNotebookId(notebookId);
+    setDiscussionListRefetchToken((t) => t + 1);
+  }
+
+  // Selecting a discussion also selects the notebook it lives in --
+  // switching to a discussion inside Notebook B and then using "Add a
+  // discussion" (without separately clicking B's own row) must target B,
+  // not whatever was selected before.
+  function handleDiscussionSelected(discussionId: string, notebookId: string) {
+    setActiveDiscussionId(discussionId);
+    setSelectedNotebookId(notebookId);
   }
 
   // Reads the selected .pact file, POSTs it to /api/notebooks/import (the
@@ -114,8 +138,15 @@ export function Workspace({
     ) {
       setActiveDiscussionId(null);
     }
+    // The deleted notebook can't stay the selected target for "Add a
+    // discussion to this notebook" -- NotebookCreator's own render-time
+    // reset (keyed on selectedNotebookId itself) picks this up and clears
+    // its input/error the instant this commits, before it could ever
+    // submit against a notebook that no longer exists.
+    if (selectedNotebookId === notebookId) {
+      setSelectedNotebookId(null);
+    }
     setDiscussionListRefetchToken((t) => t + 1);
-    setLastDeletedNotebookId(notebookId);
   }
 
   function handleDiscussionDeleted(discussionId: string) {
@@ -135,16 +166,17 @@ export function Workspace({
       >
         <Explorer
           activeDiscussionId={activeDiscussionId}
-          onSelect={setActiveDiscussionId}
+          onSelect={handleDiscussionSelected}
+          onNotebookSelected={setSelectedNotebookId}
           onNotebookDeleted={handleNotebookDeleted}
           onDiscussionDeleted={handleDiscussionDeleted}
           refetchToken={discussionListRefetchToken}
         />
         <hr />
         <NotebookCreator
-          onNotebookCreated={() => setDiscussionListRefetchToken((t) => t + 1)}
+          selectedNotebookId={selectedNotebookId}
+          onNotebookCreated={handleNotebookCreated}
           onDiscussionCreated={handleDiscussionCreated}
-          lastDeletedNotebookId={lastDeletedNotebookId}
         />
       </Panel>
       <Separator

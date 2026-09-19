@@ -105,12 +105,18 @@ function persistExpandedItems(expandedItems: string[]) {
 export function Explorer({
   activeDiscussionId,
   onSelect,
+  onNotebookSelected,
   onNotebookDeleted,
   onDiscussionDeleted,
   refetchToken,
 }: {
   activeDiscussionId: string | null;
-  onSelect: (discussionId: string) => void;
+  // notebookId is the discussion's own parent -- selecting a discussion
+  // also selects the notebook it lives in, so "Add a discussion to this
+  // notebook" targets the right one even if the user never separately
+  // clicked the notebook row itself.
+  onSelect: (discussionId: string, notebookId: string) => void;
+  onNotebookSelected: (notebookId: string) => void;
   onNotebookDeleted: (
     notebookId: string,
     deletedDiscussionIds: string[],
@@ -296,8 +302,14 @@ export function Explorer({
     indent: 20,
     onPrimaryAction: (item) => {
       const data = item.getItemData();
-      if (data.kind === "discussion") {
-        onSelect(data.discussionId);
+      // Purely additive to whatever headless-tree's own default handling
+      // of this same event already does for a folder item (the
+      // expand/collapse toggle) -- nothing here replaces or needs to
+      // coordinate with that.
+      if (data.kind === "notebook") {
+        onNotebookSelected(data.notebookId);
+      } else if (data.kind === "discussion") {
+        onSelect(data.discussionId, data.notebookId);
       }
     },
     // Seeds expandedItems from sessionStorage on mount (read once, via a
