@@ -30,8 +30,10 @@ interface ExecuteRequestBody {
 }
 
 async function handlePost(request: Request) {
+  const requestStartDate = Date.now();
   const supabase = await createClient();
 
+  const authStart = Date.now();
   const user = await tracer.startActiveSpan("auth", async (span) => {
     try {
       const {
@@ -42,6 +44,7 @@ async function handlePost(request: Request) {
       span.end();
     }
   });
+  const authMs = Date.now() - authStart;
 
   if (!user) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
@@ -77,6 +80,7 @@ async function handlePost(request: Request) {
     );
   }
 
+  const lockAcquireStart = Date.now();
   const { acquired, lockError } = await tracer.startActiveSpan(
     "lock-acquire",
     async (span) => {
@@ -91,6 +95,7 @@ async function handlePost(request: Request) {
       }
     },
   );
+  const lockAcquireMs = Date.now() - lockAcquireStart;
 
   if (lockError) {
     throw lockError;
@@ -102,6 +107,26 @@ async function handlePost(request: Request) {
       { status: 409 },
     );
   }
+
+  // Everything below this point is a genuine execution attempt (the lock
+  // is ours) -- this is also the boundary execution_timings uses for
+  // "does this run get a row at all" (see the finally block below): a
+  // failed auth, malformed request, missing API key, or lost lock race
+  // never reaches here, so none of those produce a row. Once we're past
+  // this point, a row is written unconditionally, however far the
+  // execution actually gets -- see the finally block's own comment for
+  // why "only fully-succeeded runs" would be the wrong call for a
+  // latency report specifically.
+  let maxTokens: number | null = null;
+  let resolvedModel: string | null = null;
+  let settingsReadMs: number | null = null;
+  let anthropicConnectMs: number | null = null;
+  let messageStartInsertMs: number | null = null;
+  let timeToFirstTokenMs: number | null = null;
+  let generationMs: number | null = null;
+  let finalWriteMs: number | null = null;
+  let streamingWriteCount = 0;
+  let streamingWriteTotalMs = 0;
 
   // time-to-first-token's own lifetime spans multiple iterations of the
   // SSE read loop below (from the Anthropic fetch call until the first
@@ -123,7 +148,9 @@ async function handlePost(request: Request) {
   function endTtft(endDate?: number) {
     if (!ttftEnded) {
       ttftEnded = true;
-      ttftSpan.end(endDate);
+      const resolvedEndDate = endDate ?? Date.now();
+      ttftSpan.end(resolvedEndDate);
+      timeToFirstTokenMs = resolvedEndDate - ttftStartDate;
     }
   }
 
@@ -133,30 +160,30 @@ async function handlePost(request: Request) {
     // what caused the truncated long responses found in the earlier
     // timing investigation. A missing/unreadable settings row falls back
     // to that same old value rather than failing the run.
-    const maxTokens = await tracer.startActiveSpan(
-      "settings-read",
-      async (span) => {
-        try {
-          const { data: settings, error: settingsError } = await supabase
-            .from("app_settings")
-            .select("max_tokens")
-            .eq("id", 1)
-            .maybeSingle();
+    const settingsReadStart = Date.now();
+    maxTokens = await tracer.startActiveSpan("settings-read", async (span) => {
+      try {
+        const { data: settings, error: settingsError } = await supabase
+          .from("app_settings")
+          .select("max_tokens")
+          .eq("id", 1)
+          .maybeSingle();
 
-          if (settingsError || !settings) {
-            console.error(
-              `[app-settings-fallback] Could not read app_settings (id=1) -- falling back to max_tokens=${FALLBACK_MAX_TOKENS}.`,
-              settingsError ?? "no row found",
-            );
-            return FALLBACK_MAX_TOKENS;
-          }
-          return settings.max_tokens;
-        } finally {
-          span.end();
+        if (settingsError || !settings) {
+          console.error(
+            `[app-settings-fallback] Could not read app_settings (id=1) -- falling back to max_tokens=${FALLBACK_MAX_TOKENS}.`,
+            settingsError ?? "no row found",
+          );
+          return FALLBACK_MAX_TOKENS;
         }
-      },
-    );
+        return settings.max_tokens;
+      } finally {
+        span.end();
+      }
+    });
+    settingsReadMs = Date.now() - settingsReadStart;
 
+    const anthropicConnectStart = Date.now();
     const anthropicResponse = await context.with(ttftCtx, () =>
       tracer.startActiveSpan("anthropic-connect", async (span) => {
         try {
@@ -179,6 +206,7 @@ async function handlePost(request: Request) {
         }
       }),
     );
+    anthropicConnectMs = Date.now() - anthropicConnectStart;
 
     if (!anthropicResponse.ok || !anthropicResponse.body) {
       endTtft();
@@ -196,7 +224,6 @@ async function handlePost(request: Request) {
       );
     }
 
-    let resolvedModel: string | null = null;
     let accumulatedText = "";
     let responseRowId: string | null = null;
     let responseCreatedAt: string | null = null;
@@ -215,8 +242,6 @@ async function handlePost(request: Request) {
     // count/total/avg already give).
     let firstTokenAtDate: number | null = null;
     let firstWriteAtDate: number | null = null;
-    let streamingWriteCount = 0;
-    let streamingWriteTotalMs = 0;
 
     const reader = anthropicResponse.body.getReader();
     const decoder = new TextDecoder();
@@ -258,6 +283,7 @@ async function handlePost(request: Request) {
             // arrived. A child of time-to-first-token, not of
             // anthropic-connect (which has already ended by this point) —
             // both are ttft's own children, not nested under each other.
+            const messageStartInsertStart = Date.now();
             const inserted = await context.with(ttftCtx, () =>
               tracer.startActiveSpan("message-start-insert", async (span) => {
                 try {
@@ -283,6 +309,7 @@ async function handlePost(request: Request) {
                 }
               }),
             );
+            messageStartInsertMs = Date.now() - messageStartInsertStart;
             responseRowId = inserted.id as string;
             responseCreatedAt = inserted.created_at as string;
             break;
@@ -339,12 +366,12 @@ async function handlePost(request: Request) {
             // confirmed against the route's own logic (this is the same
             // firstTokenAt-to-message_stop measurement task 13 asked to
             // re-verify, not a new one).
+            const generationStartDate = firstTokenAtDate ?? ttftStartDate;
             const generationEndDate = Date.now();
             tracer
-              .startSpan("generation", {
-                startTime: firstTokenAtDate ?? ttftStartDate,
-              })
+              .startSpan("generation", { startTime: generationStartDate })
               .end(generationEndDate);
+            generationMs = generationEndDate - generationStartDate;
 
             // Aggregated span for every throttled UPDATE this response
             // made — see the comment above streamingWriteCount for why
@@ -372,6 +399,7 @@ async function handlePost(request: Request) {
               firstWriteAtDate !== null ? generationEndDate : undefined,
             );
 
+            const finalWriteStart = Date.now();
             await tracer.startActiveSpan("final-write", async (span) => {
               try {
                 // Final write, unconditional on the throttle, so no
@@ -411,6 +439,7 @@ async function handlePost(request: Request) {
                 span.end();
               }
             });
+            finalWriteMs = Date.now() - finalWriteStart;
             break;
           }
 
@@ -471,6 +500,7 @@ async function handlePost(request: Request) {
     // before either of the two normal end points (the error check right
     // after anthropic-connect, or the first text_delta) was reached.
     endTtft();
+    const lockReleaseStart = Date.now();
     await tracer.startActiveSpan("lock-release", async (span) => {
       try {
         await supabase.from("execution_locks").delete().eq("user_id", user.id);
@@ -478,6 +508,61 @@ async function handlePost(request: Request) {
         span.end();
       }
     });
+    const lockReleaseMs = Date.now() - lockReleaseStart;
+
+    // Durable counterpart to the spans above (task 13 Option B /
+    // task 15): one row per genuine execution attempt -- everything
+    // from here down only ever runs once the lock was actually
+    // acquired, so a failed auth, malformed request, missing API key,
+    // or lost lock race never produces a row; those aren't executions.
+    // Deliberately unconditional beyond that boundary, though -- this
+    // block runs whether the try above returned successfully or threw,
+    // so a run that fails partway through (a bad Anthropic response, a
+    // DB error mid-stream) still gets a row, with whichever ms columns
+    // never got assigned left null. A "only insert on full success"
+    // rule would silently exclude exactly the slow-then-failed runs a
+    // latency report most needs to see -- the failure paths above are
+    // real (a truncated Anthropic connection, a thrown Supabase error
+    // mid-loop), not hypothetical, so this isn't a corner nobody hits.
+    //
+    // Wrapped in its own try/catch, never rethrown: this is diagnostic
+    // data, not core functionality, and it runs after the try/catch
+    // above has already produced (or is about to produce, on the way
+    // back up through this finally) the real response. A throw
+    // reaching the top of this finally block would replace that
+    // response with withRouteErrorHandling's generic 500 -- turning a
+    // successful execution into an apparent failure for the client
+    // over a broken diagnostic insert. That must never happen, so
+    // every failure mode here (a returned `error`, or an actual thrown
+    // exception from the call itself) is caught and only logged.
+    try {
+      const totalMs = Date.now() - requestStartDate;
+      const { error: timingInsertError } = await supabase
+        .from("execution_timings")
+        .insert({
+          user_id: user.id,
+          discussion_id: discussionId,
+          resolved_model: resolvedModel,
+          max_tokens: maxTokens,
+          auth_ms: authMs,
+          lock_acquire_ms: lockAcquireMs,
+          settings_read_ms: settingsReadMs,
+          anthropic_connect_ms: anthropicConnectMs,
+          message_start_insert_ms: messageStartInsertMs,
+          time_to_first_token_ms: timeToFirstTokenMs,
+          generation_ms: generationMs,
+          throttled_write_count: streamingWriteCount,
+          throttled_write_total_ms: Math.round(streamingWriteTotalMs),
+          final_write_ms: finalWriteMs,
+          lock_release_ms: lockReleaseMs,
+          total_ms: totalMs,
+        });
+      if (timingInsertError) {
+        console.error("[execution-timings-insert-failed]", timingInsertError);
+      }
+    } catch (timingInsertException) {
+      console.error("[execution-timings-insert-failed]", timingInsertException);
+    }
   }
 }
 
