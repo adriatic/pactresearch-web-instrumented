@@ -16,13 +16,27 @@ const FALLBACK_MAX_TOKENS = 1000;
 // in. Anthropic's content_block_delta events can arrive many times a
 // second — writing to Postgres on every single one would be wasteful and
 // buys nothing, since no human (or Realtime-subscribed UI) can perceive
-// updates faster than this anyway. 500ms is chosen the same way the
-// execution_locks staleness threshold was: long enough to keep write
-// volume reasonable even for a long, fast-streaming response (a ~10s
-// generation lands around 20 writes, not hundreds), short enough that a
-// Realtime subscriber watching the row still sees it grow live, well
-// under the threshold of feeling laggy.
-const STREAM_WRITE_THROTTLE_MS = 500;
+// updates faster than this anyway.
+//
+// Was 500ms until task 18. Task 12's baseline round measured these
+// throttled writes costing 19-34% of total request time across five real
+// discussions (write count tracks generation_ms / interval almost
+// exactly -- confirmed there, not assumed) -- the interval was short
+// enough, relative to how long these responses actually run, that its
+// cumulative per-call overhead (auth/RLS/PostgREST overhead per HTTP
+// round trip, not the UPDATE's own cost -- the same ~100-300ms per-call
+// floor shows up on auth/lock-acquire/settings-read too, all unrelated
+// to payload size) became a real, measurable chunk of wall time. Raised
+// 4x (task 18's evaluation: this dominates the write count for any
+// throttle scheme, so a length/token-based trigger buys little extra
+// over just raising the interval; moving off Postgres UPDATEs onto
+// Realtime broadcast would eliminate the cost entirely but means
+// rewriting the live-preview's whole data path -- see task 18's report
+// for the full trade-off). Live-preview UI (`postgres_changes`
+// subscription in useDiscussionExecution.ts) now updates roughly every
+// 2s during generation instead of every 500ms -- still clearly
+// perceived as "streaming" at human reading speed, not choppy.
+const STREAM_WRITE_THROTTLE_MS = 2000;
 
 interface ExecuteRequestBody {
   discussionId: string;
