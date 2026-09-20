@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/utils/supabase/server";
 import { isAdmin } from "@/lib/isAdmin";
@@ -27,5 +28,12 @@ export default async function AdminPage() {
     throw error;
   }
 
-  return <AdminSettingsForm initialMaxTokens={settings?.max_tokens ?? 40000} />;
+  return (
+    <>
+      <AdminSettingsForm initialMaxTokens={settings?.max_tokens ?? 40000} />
+      <p>
+        <Link href="/admin/timings">Execution timings</Link>
+      </p>
+    </>
+  );
 }
